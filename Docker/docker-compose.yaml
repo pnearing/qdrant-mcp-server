@@ -1,0 +1,57 @@
+services:
+  qdrant-mcp:
+    image: qdrant-mcp-server:v3.3.5
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: qdrant-mcp
+
+    restart: unless-stopped
+
+    user: "1028:100"
+
+    environment:
+      # MCP transport
+      TRANSPORT_MODE: "http"
+      HTTP_PORT: "3000"
+
+      # Qdrant
+      QDRANT_API_KEY: "Recycled-Uncoiled-Roman-Crusader-Uprising8-Another"
+      QDRANT_URL: "http://qdrant:6333"
+
+      # Embeddings
+      EMBEDDING_PROVIDER: "ollama"
+      EMBEDDING_MODEL: "nomic-embed-text"
+      EMBEDDING_BASE_URL: "http://192.168.2.109:11434"
+
+      # Logging
+      LOG_LEVEL: "info"
+
+      # Code indexing
+      CODE_ENABLE_AST: "true"
+      CODE_CHUNK_SIZE: "2500"
+      CODE_CHUNK_OVERLAP: "300"
+      CODE_BATCH_SIZE: "100"
+      CODE_DEFAULT_LIMIT: "5"
+
+      # Git history
+      GIT_MAX_COMMITS: "5000"
+      GIT_INCLUDE_FILES: "true"
+      GIT_INCLUDE_DIFF: "true"
+      GIT_ENABLE_HYBRID: "true"
+
+    volumes:
+      - ./sources:/sources:ro
+
+    ports:
+      - "3001:3000"
+
+    networks:
+      - rag
+
+networks:
+  rag:
+    external: true
+    name: rag
