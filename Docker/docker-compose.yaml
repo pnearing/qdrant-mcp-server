@@ -1,6 +1,6 @@
 services:
   qdrant-mcp:
-    image: qdrant-mcp-server:v3.3.5
+    image: qdrant-mcp-server:v3.3.5-unprivileged
 
     build:
       context: .

@@ -45,3 +45,4 @@ collection-with-*
 Docker/.env copy
 Docker/.env
 sources/
+Docker/.env.wind
