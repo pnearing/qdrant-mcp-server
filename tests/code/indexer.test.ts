@@ -1,11 +1,15 @@
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodeIndexer } from "../../src/code/indexer.js";
 import type { CodeConfig } from "../../src/code/types.js";
 import type { EmbeddingProvider } from "../../src/embeddings/base.js";
 import type { QdrantManager } from "../../src/qdrant/client.js";
+
+const execFileAsync = promisify(execFile);
 
 vi.mock("../logger.js", () => ({
   default: {
@@ -1252,6 +1256,105 @@ export function process() {
       }
     });
   });
+
+  describe("Branch-aware worktree isolation", () => {
+    it("isolates indexing, incremental updates, metadata, snapshots, and clearing", async () => {
+      const repositoryPath = join(tempDir, "repository");
+      const featurePath = join(tempDir, "feature-worktree");
+      const remoteName = `project-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      await fs.mkdir(repositoryPath, { recursive: true });
+      await runGit(repositoryPath, "init", "-b", "main");
+      await runGit(repositoryPath, "config", "user.email", "tests@example.com");
+      await runGit(repositoryPath, "config", "user.name", "Tests");
+      await fs.writeFile(
+        join(repositoryPath, "branch.ts"),
+        'export function branchValue(): string { return "main-content"; }\n'
+      );
+      await runGit(repositoryPath, "add", "branch.ts");
+      await runGit(repositoryPath, "commit", "-m", "main content");
+      await runGit(
+        repositoryPath,
+        "remote",
+        "add",
+        "origin",
+        `https://forgejo.example/team/${remoteName}.git`
+      );
+      await runGit(repositoryPath, "branch", "feature/test");
+      await runGit(repositoryPath, "worktree", "add", featurePath, "feature/test");
+
+      await fs.writeFile(
+        join(featurePath, "branch.ts"),
+        'export function branchValue(): string { return "feature-content"; }\n'
+      );
+      await runGit(featurePath, "add", "branch.ts");
+      await runGit(featurePath, "commit", "-m", "feature content");
+
+      const mainCommit = await runGit(repositoryPath, "rev-parse", "HEAD");
+      const featureCommit = await runGit(featurePath, "rev-parse", "HEAD");
+
+      const mainIndexStats = await indexer.indexCodebase(repositoryPath);
+      const featureIndexStats = await indexer.indexCodebase(featurePath);
+      expect(mainIndexStats).toMatchObject({ status: "completed" });
+      expect(featureIndexStats).toMatchObject({ status: "completed" });
+
+      const mainStatus = await indexer.getIndexStatus(repositoryPath);
+      const featureStatus = await indexer.getIndexStatus(featurePath);
+      expect(mainStatus.collectionName).not.toBe(featureStatus.collectionName);
+
+      const mainResult = (await indexer.searchCode(repositoryPath, "branch value")).find(
+        (result) => result.filePath === "branch.ts"
+      );
+      const featureResult = (await indexer.searchCode(featurePath, "branch value")).find(
+        (result) => result.filePath === "branch.ts"
+      );
+
+      expect(mainResult).toMatchObject({
+        content: expect.stringContaining("main-content"),
+        repositoryRemote: `forgejo.example/team/${remoteName}`,
+        branch: "main",
+        commit: mainCommit,
+      });
+      expect(featureResult).toMatchObject({
+        content: expect.stringContaining("feature-content"),
+        repositoryRemote: `forgejo.example/team/${remoteName}`,
+        branch: "feature/test",
+        commit: featureCommit,
+      });
+
+      await fs.writeFile(
+        join(featurePath, "branch.ts"),
+        'export function branchValue(): string { return "feature-updated"; }\n'
+      );
+      await runGit(featurePath, "add", "branch.ts");
+      await runGit(featurePath, "commit", "-m", "update feature");
+      const updatedFeatureCommit = await runGit(featurePath, "rev-parse", "HEAD");
+
+      await indexer.reindexChanges(featurePath);
+
+      const unchangedMainResult = (await indexer.searchCode(repositoryPath, "branch value")).find(
+        (result) => result.filePath === "branch.ts"
+      );
+      const updatedFeatureResult = (await indexer.searchCode(featurePath, "branch value")).find(
+        (result) => result.filePath === "branch.ts"
+      );
+      expect(unchangedMainResult?.content).toContain("main-content");
+      expect(unchangedMainResult?.commit).toBe(mainCommit);
+      expect(updatedFeatureResult?.content).toContain("feature-updated");
+      expect(updatedFeatureResult?.commit).toBe(updatedFeatureCommit);
+
+      await indexer.clearIndex(featurePath);
+      expect((await indexer.getIndexStatus(featurePath)).status).toBe("not_indexed");
+      expect((await indexer.getIndexStatus(repositoryPath)).status).toBe("indexed");
+      expect(
+        (await indexer.searchCode(repositoryPath, "branch value")).find(
+          (result) => result.filePath === "branch.ts"
+        )?.content
+      ).toContain("main-content");
+
+      await indexer.clearIndex(repositoryPath);
+    });
+  });
 });
 
 // Helper function to create test files
@@ -1264,4 +1367,9 @@ async function createTestFile(
   const dir = join(fullPath, "..");
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(fullPath, content, "utf-8");
+}
+
+async function runGit(cwd: string, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, { cwd });
+  return stdout.trim();
 }

@@ -4,8 +4,11 @@
  */
 
 import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_GIT_CONFIG } from "./config.js";
 import { GitExtractor } from "./extractor.js";
 import type { GitConfig } from "./types.js";
@@ -219,5 +222,32 @@ describe("GitExtractor Integration Tests", () => {
         expect(count).toBe(parseInt(stdout.trim(), 10));
       }
     });
+  });
+});
+
+describe("GitExtractor bare mirror compatibility", () => {
+  let temporaryPath: string;
+  let barePath: string;
+
+  beforeAll(async () => {
+    temporaryPath = await fs.mkdtemp(join(tmpdir(), "qdrant-bare-mirror-"));
+    barePath = join(temporaryPath, "repository.git");
+    await execFileAsync("git", ["clone", "--bare", process.cwd(), barePath]);
+  });
+
+  afterAll(async () => {
+    await fs.rm(temporaryPath, { recursive: true, force: true });
+  });
+
+  it("validates and extracts repository-wide history from a bare mirror", async () => {
+    const extractor = new GitExtractor(barePath, {
+      ...DEFAULT_GIT_CONFIG,
+      maxCommits: 5,
+    });
+
+    expect(await extractor.validateRepository()).toBe(true);
+    expect(await extractor.getLatestCommitHash()).toMatch(/^[a-f0-9]{40}$/);
+    expect(await extractor.getCommitCount()).toBeGreaterThan(0);
+    expect((await extractor.getCommits({ maxCommits: 5 })).length).toBeGreaterThan(0);
   });
 });

@@ -424,6 +424,9 @@ export function registerFederatedTools(server: McpServer, deps: FederatedToolDep
             result.codeResults.forEach((r, idx) => {
               sections.push(
                 `### ${idx + 1}. ${r.filePath}:${r.startLine}-${r.endLine} (score: ${r.score.toFixed(3)})\n` +
+                  (r.repositoryRemote ? `Repository: ${r.repositoryRemote}\n` : "") +
+                  (r.branch ? `Branch: ${r.branch}\n` : "") +
+                  (r.commit ? `Commit: ${r.commit.substring(0, 12)}\n` : "") +
                   `Language: ${r.language}\n` +
                   "```" +
                   r.language +
@@ -529,6 +532,9 @@ export function registerFederatedTools(server: McpServer, deps: FederatedToolDep
             sections.push(
               `## ${idx + 1}. [CODE] ${r.filePath}:${r.startLine}-${r.endLine}\n` +
                 `Repository: ${r.repoPath} | Language: ${r.language} | Score: ${r.score.toFixed(3)}\n` +
+                (r.repositoryRemote ? `Remote: ${r.repositoryRemote}\n` : "") +
+                (r.branch ? `Branch: ${r.branch}\n` : "") +
+                (r.commit ? `Commit: ${r.commit.substring(0, 12)}\n` : "") +
                 "```" +
                 r.language +
                 "\n" +

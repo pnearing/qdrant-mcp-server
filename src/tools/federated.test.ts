@@ -327,6 +327,9 @@ describe("contextual_search integration", () => {
         language: "typescript",
         score: 0.9,
         fileExtension: ".ts",
+        repositoryRemote: "forgejo.example/team/project",
+        branch: "feature/test",
+        commit: "0123456789abcdef0123456789abcdef01234567",
       },
     ]);
     mockGitHistoryIndexer.searchHistory.mockResolvedValue([
@@ -382,6 +385,9 @@ describe("contextual_search integration", () => {
     expect(result.content[0].text).toContain("Code Results");
     expect(result.content[0].text).toContain("Git History Results");
     expect(result.content[0].text).toContain("Correlations");
+    expect(result.content[0].text).toContain("Repository: forgejo.example/team/project");
+    expect(result.content[0].text).toContain("Branch: feature/test");
+    expect(result.content[0].text).toContain("Commit: 0123456789ab");
   });
 
   it("should return error when code index not found", async () => {
@@ -452,6 +458,9 @@ describe("contextual_search integration", () => {
         language: "typescript",
         score: 0.9,
         fileExtension: ".ts",
+        repositoryRemote: "forgejo.example/team/project",
+        branch: "feature/test",
+        commit: "0123456789abcdef0123456789abcdef01234567",
       },
     ]);
     mockGitHistoryIndexer.searchHistory.mockResolvedValue([
@@ -526,6 +535,9 @@ describe("federated_search integration", () => {
         language: "typescript",
         score: 0.9,
         fileExtension: ".ts",
+        repositoryRemote: "forgejo.example/team/project",
+        branch: "feature/test",
+        commit: "0123456789abcdef0123456789abcdef01234567",
       },
     ]);
     mockGitHistoryIndexer.searchHistory.mockResolvedValue([
@@ -566,6 +578,9 @@ describe("federated_search integration", () => {
     expect(mockGitHistoryIndexer.searchHistory).toHaveBeenCalledTimes(2);
     expect(result.content[0].text).toContain("Federated Search Results");
     expect(result.content[0].text).toContain("Repositories: 2");
+    expect(result.content[0].text).toContain("Remote: forgejo.example/team/project");
+    expect(result.content[0].text).toContain("Branch: feature/test");
+    expect(result.content[0].text).toContain("Commit: 0123456789ab");
   });
 
   it("should fail fast when any repository is not indexed", async () => {

@@ -4,6 +4,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CodeIndexer } from "../code/indexer.js";
+import type { CodeSearchResult } from "../code/types.js";
 import logger from "../logger.js";
 import { withToolLogging } from "./logging.js";
 import * as schemas from "./schemas.js";
@@ -12,6 +13,21 @@ const log = logger.child({ component: "tools" });
 
 export interface CodeToolDependencies {
   codeIndexer: CodeIndexer;
+}
+
+export function formatCodeSearchResults(results: CodeSearchResult[]): string {
+  return results
+    .map(
+      (result, index) =>
+        `\n--- Result ${index + 1} (score: ${result.score.toFixed(3)}) ---\n` +
+        (result.repositoryRemote ? `Repository: ${result.repositoryRemote}\n` : "") +
+        (result.branch ? `Branch: ${result.branch}\n` : "") +
+        (result.commit ? `Commit: ${result.commit.substring(0, 12)}\n` : "") +
+        `File: ${result.filePath}:${result.startLine}-${result.endLine}\n` +
+        `Language: ${result.language}\n\n` +
+        `${result.content}\n`
+    )
+    .join("\n");
 }
 
 export function registerCodeTools(server: McpServer, deps: CodeToolDependencies): void {
@@ -91,18 +107,7 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
       }
 
       // Format results with file references
-      const formattedResults = results
-        .map(
-          (r, idx) =>
-            `\n--- Result ${idx + 1} (score: ${r.score.toFixed(3)}) ---\n` +
-            (r.repositoryRemote ? `Repository: ${r.repositoryRemote}\n` : "") +
-            (r.branch ? `Branch: ${r.branch}\n` : "") +
-            (r.commit ? `Commit: ${r.commit.substring(0, 12)}\n` : "") +
-            `File: ${r.filePath}:${r.startLine}-${r.endLine}\n` +
-            `Language: ${r.language}\n\n` +
-            `${r.content}\n`
-        )
-        .join("\n");
+      const formattedResults = formatCodeSearchResults(results);
 
       return {
         content: [
