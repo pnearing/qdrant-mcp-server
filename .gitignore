@@ -41,3 +41,7 @@ bin/
 # Test artifacts and planning docs
 test-collection*
 collection-with-*
+
+Docker/.env copy
+Docker/.env
+sources/

@@ -20,6 +20,9 @@ WORKDIR /src/qdrant-mcp-server
 
 RUN npm ci
 
+# Run the test suite before producing the runtime image.
+RUN npm test -- --run
+
 RUN npm run build
 
 # Remove development-only packages after compiling.
