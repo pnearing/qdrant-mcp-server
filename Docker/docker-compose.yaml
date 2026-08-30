@@ -18,7 +18,7 @@ services:
     user: "${CONTAINER_UID}:${CONTAINER_GID}"
 
     volumes:
-      - /volume1/docker/shared_data/qdrant-mcp/sources:/sources:rw
+      - /volume1/docker/shared_data/qdrant-mcp:/sources:rw
 
     ports:
       - "3001:3000"
