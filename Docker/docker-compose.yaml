@@ -23,8 +23,9 @@ services:
 
       # Embeddings
       EMBEDDING_PROVIDER: "ollama"
-      EMBEDDING_MODEL: "nomic-embed-text"
-      EMBEDDING_BASE_URL: "http://192.168.2.109:11434"
+      EMBEDDING_MODEL: "hf.co/Qwen/Qwen3-Embedding-8B-GGUF:Q8_0"
+      EMBEDDING_BASE_URL: "http://192.168.2.21:11434"
+      EMBEDDING_DIMENSIONS: "4096"
 
       # Logging
       LOG_LEVEL: "info"
@@ -43,7 +44,7 @@ services:
       GIT_ENABLE_HYBRID: "true"
 
     volumes:
-      - ./sources:/sources:ro
+      - /volume1/docker/shared_data/qdrant-mcp/sources:/sources:rw
 
     ports:
       - "3001:3000"
