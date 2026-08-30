@@ -95,6 +95,9 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
         .map(
           (r, idx) =>
             `\n--- Result ${idx + 1} (score: ${r.score.toFixed(3)}) ---\n` +
+            (r.repositoryRemote ? `Repository: ${r.repositoryRemote}\n` : "") +
+            (r.branch ? `Branch: ${r.branch}\n` : "") +
+            (r.commit ? `Commit: ${r.commit.substring(0, 12)}\n` : "") +
             `File: ${r.filePath}:${r.startLine}-${r.endLine}\n` +
             `Language: ${r.language}\n\n` +
             `${r.content}\n`

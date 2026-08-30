@@ -68,6 +68,9 @@ export interface CodeSearchResult {
   language: string;
   score: number;
   fileExtension: string;
+  repositoryRemote?: string;
+  branch?: string;
+  commit?: string;
 }
 
 export interface SearchOptions {

@@ -2,18 +2,19 @@
  * CodeIndexer - Main orchestrator for code vectorization
  */
 
-import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
-import { promisify } from "node:util";
 import picomatch from "picomatch";
 import type { EmbeddingProvider } from "../embeddings/base.js";
 import { BM25SparseVectorGenerator } from "../embeddings/sparse.js";
-import { normalizeRemoteUrl } from "../git/extractor.js";
 import logger from "../logger.js";
 import type { QdrantManager } from "../qdrant/client.js";
 import { TreeSitterChunker } from "./chunker/tree-sitter-chunker.js";
+import {
+  getCodeCollectionName,
+  resolveCodebaseIdentity,
+  type CodebaseIdentity,
+} from "./identity.js";
 import { MetadataExtractor } from "./metadata.js";
 import { FileScanner } from "./scanner.js";
 import { FileSynchronizer } from "./sync/synchronizer.js";
@@ -28,8 +29,6 @@ import type {
   ProgressCallback,
   SearchOptions,
 } from "./types.js";
-
-const execFileAsync = promisify(execFile);
 
 /** Reserved ID for storing indexing metadata in the collection */
 const INDEXING_METADATA_ID = "__indexing_metadata__";
@@ -84,7 +83,8 @@ export class CodeIndexer {
     };
 
     const absolutePath = await this.validatePath(path);
-    const collectionName = await this.getCollectionName(absolutePath);
+    const identity = await resolveCodebaseIdentity(absolutePath);
+    const collectionName = getCodeCollectionName(identity);
 
     this.log.info({ path: absolutePath, collectionName }, "Indexing started");
 
@@ -246,6 +246,7 @@ export class CodeIndexer {
               language: b.chunk.metadata.language,
               codebasePath: absolutePath,
               chunkIndex: b.chunk.metadata.chunkIndex,
+              ...this.gitPayload(identity),
               ...(b.chunk.metadata.name && { name: b.chunk.metadata.name }),
               ...(b.chunk.metadata.chunkType && {
                 chunkType: b.chunk.metadata.chunkType,
@@ -277,6 +278,7 @@ export class CodeIndexer {
                 language: b.chunk.metadata.language,
                 codebasePath: absolutePath,
                 chunkIndex: b.chunk.metadata.chunkIndex,
+                ...this.gitPayload(identity),
                 ...(b.chunk.metadata.name && { name: b.chunk.metadata.name }),
                 ...(b.chunk.metadata.chunkType && {
                   chunkType: b.chunk.metadata.chunkType,
@@ -371,7 +373,7 @@ export class CodeIndexer {
     options?: SearchOptions
   ): Promise<CodeSearchResult[]> {
     const absolutePath = await this.validatePath(path);
-    const collectionName = await this.getCollectionName(absolutePath);
+    const collectionName = getCodeCollectionName(await resolveCodebaseIdentity(absolutePath));
 
     // Check if collection exists
     const exists = await this.qdrant.collectionExists(collectionName);
@@ -452,6 +454,9 @@ export class CodeIndexer {
       language: r.payload?.language || "unknown",
       score: r.score,
       fileExtension: r.payload?.fileExtension || "",
+      repositoryRemote: r.payload?.repositoryRemote || undefined,
+      branch: r.payload?.branch || undefined,
+      commit: r.payload?.commit || undefined,
     }));
   }
 
@@ -460,7 +465,7 @@ export class CodeIndexer {
    */
   async getIndexStatus(path: string): Promise<IndexStatus> {
     const absolutePath = await this.validatePath(path);
-    const collectionName = await this.getCollectionName(absolutePath);
+    const collectionName = getCodeCollectionName(await resolveCodebaseIdentity(absolutePath));
     const exists = await this.qdrant.collectionExists(collectionName);
 
     if (!exists) {
@@ -537,7 +542,8 @@ export class CodeIndexer {
 
     try {
       const absolutePath = await this.validatePath(path);
-      const collectionName = await this.getCollectionName(absolutePath);
+      const identity = await resolveCodebaseIdentity(absolutePath);
+      const collectionName = getCodeCollectionName(identity);
 
       this.log.info({ path: absolutePath }, "Reindex started");
 
@@ -679,6 +685,7 @@ export class CodeIndexer {
             language: b.chunk.metadata.language,
             codebasePath: absolutePath,
             chunkIndex: b.chunk.metadata.chunkIndex,
+            ...this.gitPayload(identity),
             ...(b.chunk.metadata.name && { name: b.chunk.metadata.name }),
             ...(b.chunk.metadata.chunkType && {
               chunkType: b.chunk.metadata.chunkType,
@@ -733,7 +740,7 @@ export class CodeIndexer {
   async clearIndex(path: string): Promise<void> {
     this.log.info({ path }, "Clearing index");
     const absolutePath = await this.validatePath(path);
-    const collectionName = await this.getCollectionName(absolutePath);
+    const collectionName = getCodeCollectionName(await resolveCodebaseIdentity(absolutePath));
     const exists = await this.qdrant.collectionExists(collectionName);
 
     if (exists) {
@@ -749,48 +756,11 @@ export class CodeIndexer {
     }
   }
 
-  /**
-   * Generate deterministic collection name from codebase path.
-   * Uses git remote URL for consistent naming across machines, with fallback to directory name.
-   */
-  private async getCollectionName(path: string): Promise<string> {
-    const absolutePath = resolve(path);
-
-    // Try git remote URL for consistent naming
-    // Check if THIS directory is the git root (not just inside a git repo)
-    try {
-      // Clear git environment variables that may be set during pre-commit hooks
-      // These variables cause git commands to use the wrong repository
-      const cleanEnv = { ...process.env };
-      delete cleanEnv.GIT_DIR;
-      delete cleanEnv.GIT_WORK_TREE;
-      delete cleanEnv.GIT_INDEX_FILE;
-
-      const { stdout: gitRootResult } = await execFileAsync(
-        "git",
-        ["rev-parse", "--show-toplevel"],
-        { cwd: absolutePath, env: cleanEnv }
-      );
-      const gitRoot = gitRootResult.trim();
-
-      // Only use git remote if this path IS the git root
-      if (gitRoot === absolutePath) {
-        const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
-          cwd: absolutePath,
-          env: cleanEnv,
-        });
-        const normalized = normalizeRemoteUrl(stdout.trim());
-        if (normalized) {
-          const hash = createHash("md5").update(normalized).digest("hex");
-          return `code_${hash.substring(0, 8)}`;
-        }
-      }
-    } catch {
-      // Not a git repo or no remote
-    }
-
-    // Fallback: full absolute path (consistent with original behavior)
-    const hash = createHash("md5").update(absolutePath).digest("hex");
-    return `code_${hash.substring(0, 8)}`;
+  private gitPayload(identity: CodebaseIdentity): Record<string, string> {
+    return {
+      ...(identity.repositoryRemote && { repositoryRemote: identity.repositoryRemote }),
+      ...(identity.branch && { branch: identity.branch }),
+      ...(identity.commit && { commit: identity.commit }),
+    };
   }
 }

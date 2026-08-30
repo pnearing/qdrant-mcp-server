@@ -366,6 +366,38 @@ search_code({
 });
 ```
 
+#### Branch-aware indexes
+
+Code indexes are identified by the normalized Git `origin` remote and the checked-out
+branch. Separate worktrees for `main` and `feature/test` therefore use separate
+Qdrant collections and incremental snapshots, even though they share one remote:
+
+```text
+/sources/repositories/user/project/branches/main
+/sources/repositories/user/project/branches/feature-test
+```
+
+The collection name is `code_<16 hex characters>`, derived from
+`SHA-256(normalizedRemote + NUL + branch)`. Moving a worktree does not change its
+collection. Non-Git directories use their absolute path as the identity. A detached
+HEAD uses `detached/<12-character commit SHA>` and emits a warning.
+
+Every newly indexed code chunk includes `repositoryRemote`, `branch`, and
+`commit` when Git metadata is available. The commit is the repository HEAD at the
+time that chunk was written; after incremental indexing, unchanged chunks can retain
+an older indexing commit.
+
+`index_codebase`, `search_code`, `reindex_changes`, `get_index_status`, and
+`clear_index` all derive identity from the supplied worktree path. Clearing one
+branch cannot clear a sibling branch. Git-history indexing remains repository-wide;
+index it once through a canonical worktree rather than once per branch.
+
+**Migration from versions before branch-aware indexes:** existing eight-character
+MD5 code collections are not renamed or deleted automatically. Deploy the new
+server, run `index_codebase` once for every branch worktree, verify searches, and
+only then remove the legacy collections. New collection names also produce new,
+independent snapshot files.
+
 #### Incremental Re-indexing
 
 ```typescript
