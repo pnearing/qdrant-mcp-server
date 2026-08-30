@@ -46,3 +46,4 @@ Docker/.env copy
 Docker/.env
 sources/
 Docker/.env.wind
+.cspell/custom-dictionary-workspace.txt
