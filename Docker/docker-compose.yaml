@@ -10,7 +10,11 @@ services:
 
     env_file:
       - .env
-
+    environment:
+      HTTP_REQUEST_TIMEOUT_MS: 3600000
+      # Logging
+      LOG_LEVEL: "debug"
+      
     container_name: qdrant-mcp
 
     restart: unless-stopped
