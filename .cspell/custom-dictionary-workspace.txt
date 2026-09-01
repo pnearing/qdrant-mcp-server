@@ -1,5 +1,7 @@
 # Custom Dictionary Words
 cffecg
+GGUF
 ollama
 opencode
 qdrant
+Qwen
