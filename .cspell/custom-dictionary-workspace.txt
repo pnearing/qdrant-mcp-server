@@ -1,3 +1,5 @@
 # Custom Dictionary Words
-qdrant
+cffecg
 ollama
+opencode
+qdrant
