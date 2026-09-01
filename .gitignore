@@ -11,6 +11,8 @@ coverage/
 # Environment variables
 .env
 .env.local
+Docker/.env.wind
+Docker/.env
 
 # IDE
 .vscode/
