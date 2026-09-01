@@ -1,0 +1,36 @@
+services:
+  qdrant-mcp:
+    image: qdrant-mcp-server:v3.3.5-unprivileged
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        QDRANT_MCP_BRANCH: ${QDRANT_MCP_BRANCH}
+
+    env_file:
+      - .env
+    environment:
+      HTTP_REQUEST_TIMEOUT_MS: 3600000
+      # Logging
+      LOG_LEVEL: "debug"
+      
+    container_name: qdrant-mcp
+
+    restart: unless-stopped
+
+    user: "${CONTAINER_UID}:${CONTAINER_GID}"
+
+    volumes:
+      - "${SOURCES_PATH}:/sources:rw"
+
+    ports:
+      - "3001:3000"
+
+    networks:
+      - rag
+
+networks:
+  rag:
+    external: true
+    name: rag
