@@ -1,0 +1,3 @@
+# pack-refs with: peeled fully-peeled sorted 
+a087a76694795fa6be559c34ab658098f3e33fa0 refs/heads/feature/branch-aware-code-indexing
+f9705cd7e5bf8abb45b3946b3ec4e763926fae72 refs/heads/main

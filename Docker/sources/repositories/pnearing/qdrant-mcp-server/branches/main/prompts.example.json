@@ -1,0 +1,198 @@
+{
+  "prompts": [
+    {
+      "name": "setup_rag_collection",
+      "description": "Create a new collection optimized for RAG workflows with hybrid search",
+      "arguments": [
+        {
+          "name": "name",
+          "description": "Name for the new collection",
+          "required": true
+        }
+      ],
+      "template": "Create a new Qdrant collection named '{{name}}' optimized for RAG (Retrieval-Augmented Generation) workflows:\n\n1. Create the collection with hybrid search enabled (enableHybrid: true) to combine semantic and keyword search for better retrieval accuracy\n2. Use Cosine distance metric (optimal for most embedding models)\n3. After creation, show the collection info and explain the configuration\n4. Provide guidance on adding documents with proper metadata structure for RAG use cases"
+    },
+    {
+      "name": "analyze_and_optimize",
+      "description": "Analyze a collection and provide optimization recommendations",
+      "arguments": [
+        {
+          "name": "collection",
+          "description": "Name of the collection to analyze",
+          "required": true
+        }
+      ],
+      "template": "Perform a comprehensive analysis of the '{{collection}}' collection:\n\n1. Get the collection info (dimensions, document count, distance metric, hybrid search status)\n2. Analyze the configuration and provide insights:\n   - Is the distance metric appropriate for the use case?\n   - Should hybrid search be enabled for better results?\n   - Is the document count sufficient for meaningful similarity search?\n3. Provide specific, actionable optimization recommendations\n4. If the collection seems suboptimal, suggest a migration strategy"
+    },
+    {
+      "name": "compare_search_strategies",
+      "description": "Compare semantic vs hybrid search to determine best approach",
+      "arguments": [
+        {
+          "name": "collection",
+          "description": "Collection name (must have hybrid search enabled)",
+          "required": true
+        },
+        {
+          "name": "query",
+          "description": "Test query",
+          "required": true
+        }
+      ],
+      "template": "Compare search strategies for '{{query}}' in the '{{collection}}' collection:\n\n1. Perform semantic_search and show top 5 results with scores\n2. Perform hybrid_search and show top 5 results with scores\n3. Analyze the differences:\n   - Which results appear in both? Which are unique to each method?\n   - How do the relevance scores compare?\n   - Which method seems more accurate for this query type?\n4. Recommend which search strategy to use based on:\n   - Query characteristics (keyword-heavy vs conceptual)\n   - Result quality and relevance\n   - Use case requirements"
+    },
+    {
+      "name": "migrate_to_hybrid",
+      "description": "Migrate an existing collection to use hybrid search",
+      "arguments": [
+        {
+          "name": "source",
+          "description": "Name of the existing collection to migrate",
+          "required": true
+        },
+        {
+          "name": "target",
+          "description": "Name for the new hybrid-enabled collection",
+          "required": true
+        }
+      ],
+      "template": "Migrate the '{{source}}' collection to a new hybrid search-enabled collection '{{target}}':\n\n1. First, analyze the source collection to understand its current configuration\n2. Create the target collection with hybrid search enabled, matching the source's distance metric\n3. Guide the user through retrieving documents from the source (note: you'll need to implement a retrieval mechanism or have the user provide the documents)\n4. Explain how to add the documents to the new hybrid collection\n5. Provide verification steps to ensure the migration was successful\n6. Ask if the user wants to delete the old collection after verification"
+    },
+    {
+      "name": "debug_search_quality",
+      "description": "Debug poor search results and suggest improvements",
+      "arguments": [
+        {
+          "name": "collection",
+          "description": "Collection with poor search quality",
+          "required": true
+        },
+        {
+          "name": "problematic_query",
+          "description": "A query that returns poor results",
+          "required": true
+        }
+      ],
+      "template": "Debug search quality issues in '{{collection}}' for query '{{problematic_query}}':\n\n1. Get collection info to understand the configuration\n2. Perform a search with the problematic query and analyze the results:\n   - Are the scores too low (< 0.5)? This suggests poor embedding quality or mismatched query/document domains\n   - Are irrelevant results ranking highly? This suggests metadata or hybrid search could help\n3. Test if hybrid search is available and compare results\n4. Provide specific recommendations:\n   - Should documents be re-embedded with a different model?\n   - Would metadata filtering help narrow results?\n   - Is the collection too small or missing relevant documents?\n   - Should the distance metric be changed?\n5. Suggest concrete next steps to improve search quality"
+    },
+    {
+      "name": "build_knowledge_base",
+      "description": "Guide for building a structured knowledge base with metadata",
+      "arguments": [
+        {
+          "name": "collection",
+          "description": "Collection name for the knowledge base",
+          "required": true
+        },
+        {
+          "name": "domain",
+          "description": "Domain or topic of the knowledge base",
+          "required": true
+        }
+      ],
+      "template": "Build a structured knowledge base in '{{collection}}' for the {{domain}} domain:\n\n1. Create (or verify) the collection with hybrid search enabled for optimal retrieval\n2. Design a metadata schema appropriate for {{domain}}, such as:\n   - category/topic fields for filtering\n   - timestamps for temporal filtering\n   - source/author for provenance\n   - confidence/quality scores\n3. Provide guidance on document structure:\n   - Optimal chunk sizes (typically 200-500 tokens)\n   - How to maintain context across chunks\n   - Metadata to include with each document\n4. Show example documents with proper formatting\n5. Explain search strategies for this knowledge base:\n   - When to use metadata filters\n   - When hybrid search adds value\n   - How to handle multi-step queries"
+    },
+    {
+      "name": "index_git_history",
+      "description": "Index a repository's git commit history for semantic search",
+      "arguments": [
+        {
+          "name": "repoPath",
+          "description": "Path to the git repository to index",
+          "required": true
+        }
+      ],
+      "template": "Index the git commit history for the repository at '{{repoPath}}':\n\n1. First, check the current indexing status using get_git_index_status to see if any commits are already indexed\n2. Run index_git_history to index the repository's commit history:\n   - This will extract commit messages, authors, dates, and file changes\n   - Each commit is embedded for semantic search\n3. After indexing completes, show the status summary:\n   - Total commits indexed\n   - Date range covered\n   - Any errors or skipped commits\n4. Demonstrate a sample search to verify the index is working:\n   - Search for 'bug fix' or 'refactor' to show semantic matching\n5. Explain how to keep the index updated:\n   - Use index_new_commits for incremental updates\n   - Consider setting up periodic re-indexing for active repositories"
+    },
+    {
+      "name": "search_project_history",
+      "description": "Search git history to understand how a feature or fix was implemented",
+      "arguments": [
+        {
+          "name": "repoPath",
+          "description": "Path to the git repository",
+          "required": true
+        },
+        {
+          "name": "query",
+          "description": "What to search for in the commit history",
+          "required": true
+        }
+      ],
+      "template": "Search the git history of '{{repoPath}}' for '{{query}}':\n\n1. First, verify the repository is indexed using get_git_index_status\n   - If not indexed, run index_git_history first\n2. Perform a semantic search using search_git_history:\n   - Search for: '{{query}}'\n   - Return the top 10 most relevant commits\n3. For each relevant commit, analyze:\n   - The commit message and what it indicates about the change\n   - The author and date for context\n   - The files that were modified\n4. Summarize the findings:\n   - How was this feature/fix implemented over time?\n   - Who were the main contributors?\n   - Are there related commits that provide additional context?\n5. Suggest follow-up searches if the initial results need refinement"
+    },
+    {
+      "name": "investigate_code_with_history",
+      "description": "Deep dive into code with its change history using contextual search",
+      "arguments": [
+        {
+          "name": "repo",
+          "description": "Path to the repository (must be indexed for both code and git)",
+          "required": true
+        },
+        {
+          "name": "topic",
+          "description": "Topic or feature to investigate (e.g., 'authentication', 'payment processing')",
+          "required": true
+        }
+      ],
+      "template": "Investigate '{{topic}}' in the repository '{{repo}}' using contextual search:\n\n1. First, verify the repository is indexed for both code and git history:\n   - Check code index status\n   - Check git index status\n   - If either is missing, guide the user to index first\n\n2. Run contextual_search for '{{topic}}' with codeLimit=10 and gitLimit=10\n\n3. Analyze the results:\n   - Summarize the key code implementations found\n   - List the most relevant commits and their authors\n   - Highlight the correlations (which commits modified which code)\n\n4. Provide insights:\n   - How has this code evolved over time?\n   - Who are the main contributors to this area?\n   - Are there any patterns in the commit types (fixes, features, refactors)?\n\n5. Suggest next steps:\n   - Specific files to review in detail\n   - Related areas to investigate\n   - Potential issues or technical debt indicated by the history"
+    },
+    {
+      "name": "cross_repo_search",
+      "description": "Search for patterns or implementations across multiple repositories",
+      "arguments": [
+        {
+          "name": "repos",
+          "description": "Comma-separated list of repository paths",
+          "required": true
+        },
+        {
+          "name": "pattern",
+          "description": "Pattern or implementation to find (e.g., 'error handling', 'API authentication')",
+          "required": true
+        },
+        {
+          "name": "search_type",
+          "description": "Type of search: 'code', 'git', or 'both'",
+          "required": false
+        }
+      ],
+      "template": "Search for '{{pattern}}' across multiple repositories: {{repos}}\n\n1. Parse the repository list and verify each is indexed:\n   - For searchType='code' or 'both': verify code indexes\n   - For searchType='git' or 'both': verify git indexes\n   - Report any repositories that need indexing\n\n2. Run federated_search with:\n   - paths: [parsed from {{repos}}]\n   - query: '{{pattern}}'\n   - searchType: '{{search_type}}' (default: 'both')\n   - limit: 20\n\n3. Analyze the results:\n   - Group results by repository\n   - Identify common patterns across repos\n   - Note any differences in implementation approaches\n\n4. Provide a summary:\n   - Which repositories have the most relevant code?\n   - Are there consistent patterns or divergent approaches?\n   - Which implementations could serve as best practices?\n\n5. Recommendations:\n   - Suggest standardization opportunities\n   - Identify potential shared libraries or abstractions\n   - Highlight any concerning inconsistencies"
+    },
+    {
+      "name": "trace_feature_evolution",
+      "description": "Trace how a feature evolved over time using code and git history",
+      "arguments": [
+        {
+          "name": "repo",
+          "description": "Path to the repository",
+          "required": true
+        },
+        {
+          "name": "feature",
+          "description": "Feature name or description to trace",
+          "required": true
+        }
+      ],
+      "template": "Trace the evolution of '{{feature}}' in '{{repo}}':\n\n1. Run contextual_search for '{{feature}}' with:\n   - codeLimit: 5 (focus on current implementation)\n   - gitLimit: 15 (get more history)\n   - correlate: true\n\n2. Build a timeline:\n   - List commits chronologically that relate to this feature\n   - Identify the initial implementation commit\n   - Track major changes, refactors, and bug fixes\n\n3. Analyze the evolution:\n   - How has the code changed from initial to current?\n   - What problems were fixed along the way?\n   - Were there any major rewrites or refactors?\n\n4. Identify contributors:\n   - Who introduced the feature?\n   - Who has made significant contributions since?\n   - Is there a current owner/maintainer?\n\n5. Provide insights:\n   - Stability assessment (frequent fixes = potential issues)\n   - Technical debt indicators\n   - Recommendations for future development"
+    },
+    {
+      "name": "security_audit_search",
+      "description": "Search for security-related code and fixes across repositories",
+      "arguments": [
+        {
+          "name": "repos",
+          "description": "Comma-separated list of repository paths to audit",
+          "required": true
+        },
+        {
+          "name": "focus_area",
+          "description": "Security focus area (e.g., 'authentication', 'input validation', 'encryption')",
+          "required": false
+        }
+      ],
+      "template": "Perform a security-focused search across repositories: {{repos}}\n\n1. Search for security-related code:\n   - Run federated_search with searchType='code' for:\n     - '{{focus_area}} security' (if focus_area provided)\n     - Common security patterns: 'authentication', 'authorization', 'encryption', 'input validation', 'sanitization'\n\n2. Search for security fixes in history:\n   - Run federated_search with searchType='git' for:\n     - 'security fix vulnerability'\n     - 'CVE patch'\n     - 'authentication bypass'\n     - 'injection fix'\n\n3. Analyze findings:\n   - List security-critical code areas found\n   - Identify past security issues from git history\n   - Note patterns in security fixes (common vulnerabilities)\n\n4. Risk assessment:\n   - Which repositories have the most security-sensitive code?\n   - Are there areas with frequent security fixes (potential weaknesses)?\n   - Are security best practices consistently applied?\n\n5. Recommendations:\n   - Specific areas that need security review\n   - Patterns that should be standardized\n   - Potential vulnerabilities to investigate further"
+    }
+  ]
+}
