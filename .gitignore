@@ -43,3 +43,4 @@ bin/
 # Test artifacts and planning docs
 test-collection*
 collection-with-*
+Docker/sources
