@@ -11,6 +11,8 @@ coverage/
 # Environment variables
 .env
 .env.local
+Docker/.env.wind
+Docker/.env
 
 # IDE
 .vscode/
@@ -41,6 +43,7 @@ bin/
 # Test artifacts and planning docs
 test-collection*
 collection-with-*
+Docker/sources
 
 Docker/.env copy
 Docker/.env

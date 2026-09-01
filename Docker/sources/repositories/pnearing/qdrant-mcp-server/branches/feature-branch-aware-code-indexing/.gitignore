@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+dist/
+
+# Test coverage
+coverage/
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Qdrant data (local)
+qdrant_storage/
+
+# Ollama data (local)
+ollama_storage/
+
+# Dagger
+.dagger/sdk/
+bin/
+
+# Test artifacts and planning docs
+test-collection*
+collection-with-*
