@@ -2,9 +2,17 @@
  * Code indexing tools registration
  */
 
+import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CodeIndexer } from "../code/indexer.js";
 import type { CodeSearchResult } from "../code/types.js";
+import type { IndexJobManager } from "../jobs/index-job-manager.js";
+import {
+  indexJobRequestFingerprint,
+  publicJob,
+  runBlockingJob,
+  startJobResult,
+} from "../jobs/tool-contract.js";
 import logger from "../logger.js";
 import { withToolLogging } from "./logging.js";
 import * as schemas from "./schemas.js";
@@ -13,6 +21,7 @@ const log = logger.child({ component: "tools" });
 
 export interface CodeToolDependencies {
   codeIndexer: CodeIndexer;
+  jobManager: IndexJobManager;
 }
 
 export function formatCodeSearchResults(results: CodeSearchResult[]): string {
@@ -31,7 +40,7 @@ export function formatCodeSearchResults(results: CodeSearchResult[]): string {
 }
 
 export function registerCodeTools(server: McpServer, deps: CodeToolDependencies): void {
-  const { codeIndexer } = deps;
+  const { codeIndexer, jobManager } = deps;
 
   // index_codebase
   server.registerTool(
@@ -48,24 +57,51 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
         log.info({ tool: "index_codebase", path, forceReindex }, "Tool called");
         const progressToken = extra._meta?.progressToken;
 
-        const stats = await codeIndexer.indexCodebase(
+        const target = await codeIndexer.getIndexTarget(path);
+        const terminal = await runBlockingJob(jobManager, {
+          operationId: `legacy:index_codebase:${randomUUID()}`,
+          operation: "index_codebase",
           path,
-          { forceReindex, extensions, ignorePatterns },
-          (progress) => {
-            log.debug({ phase: progress.phase, percentage: progress.percentage }, progress.message);
-            if (progressToken !== undefined) {
-              extra.sendNotification({
-                method: "notifications/progress",
-                params: {
-                  progressToken,
-                  progress: progress.percentage,
-                  total: 100,
-                  message: `[${progress.phase}] ${progress.message}`,
-                },
-              });
-            }
-          }
-        );
+          target,
+          requestFingerprint: indexJobRequestFingerprint("index_codebase", {
+            path,
+            target,
+            options: {
+              forceReindex: forceReindex ?? false,
+              extensions: extensions ?? null,
+              ignorePatterns: ignorePatterns ?? null,
+            },
+          }),
+          run: (updateProgress) =>
+            codeIndexer.indexCodebase(
+              path,
+              { forceReindex, extensions, ignorePatterns },
+              (progress) => {
+                updateProgress(progress);
+                log.debug(
+                  { phase: progress.phase, percentage: progress.percentage },
+                  progress.message
+                );
+                if (progressToken !== undefined) {
+                  void extra
+                    .sendNotification({
+                      method: "notifications/progress",
+                      params: {
+                        progressToken,
+                        progress: progress.percentage,
+                        total: 100,
+                        message: `[${progress.phase}] ${progress.message}`,
+                      },
+                    })
+                    .catch((error: unknown) => {
+                      log.debug({ err: error }, "Progress recipient disconnected");
+                    });
+                }
+              }
+            ),
+        });
+        if (!("state" in terminal)) return terminal;
+        const stats = terminal.result as Awaited<ReturnType<CodeIndexer["indexCodebase"]>>;
 
         let statusMessage = `Indexed ${stats.filesIndexed}/${stats.filesScanned} files (${stats.chunksCreated} chunks) in ${(stats.durationMs / 1000).toFixed(1)}s`;
 
@@ -79,6 +115,43 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
           content: [{ type: "text", text: statusMessage }],
           isError: stats.status === "failed",
         };
+      }
+    )
+  );
+
+  server.registerTool(
+    "start_index_codebase",
+    {
+      title: "Start Codebase Index Job",
+      description: "Schedule codebase indexing and return immediately with a durable job record.",
+      inputSchema: schemas.StartIndexCodebaseSchema,
+    },
+    withToolLogging(
+      "start_index_codebase",
+      async ({ path, operationId, sourceRevision, forceReindex, extensions, ignorePatterns }) => {
+        const target = await codeIndexer.getIndexTarget(path);
+        const requestFingerprint = indexJobRequestFingerprint("index_codebase", {
+          path,
+          target,
+          sourceRevision,
+          options: {
+            forceReindex: forceReindex ?? false,
+            extensions: extensions ?? null,
+            ignorePatterns: ignorePatterns ?? null,
+          },
+        });
+        return startJobResult(
+          await jobManager.submit({
+            operationId,
+            operation: "index_codebase",
+            path,
+            target,
+            sourceRevision,
+            requestFingerprint,
+            run: (progress) =>
+              codeIndexer.indexCodebase(path, { forceReindex, extensions, ignorePatterns }, progress),
+          })
+        );
       }
     )
   );
@@ -133,20 +206,39 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
       log.info({ tool: "reindex_changes", path }, "Tool called");
       const progressToken = extra._meta?.progressToken;
 
-      const stats = await codeIndexer.reindexChanges(path, (progress) => {
-        log.debug({ phase: progress.phase, percentage: progress.percentage }, progress.message);
-        if (progressToken !== undefined) {
-          extra.sendNotification({
-            method: "notifications/progress",
-            params: {
-              progressToken,
-              progress: progress.percentage,
-              total: 100,
-              message: `[${progress.phase}] ${progress.message}`,
-            },
-          });
-        }
+      const target = await codeIndexer.getIndexTarget(path);
+      const terminal = await runBlockingJob(jobManager, {
+        operationId: `legacy:reindex_changes:${randomUUID()}`,
+        operation: "reindex_changes",
+        path,
+        target,
+        requestFingerprint: indexJobRequestFingerprint("reindex_changes", { path, target }),
+        run: (updateProgress) =>
+          codeIndexer.reindexChanges(path, (progress) => {
+            updateProgress(progress);
+            log.debug(
+              { phase: progress.phase, percentage: progress.percentage },
+              progress.message
+            );
+            if (progressToken !== undefined) {
+              void extra
+                .sendNotification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: progress.percentage,
+                    total: 100,
+                    message: `[${progress.phase}] ${progress.message}`,
+                  },
+                })
+                .catch((error: unknown) => {
+                  log.debug({ err: error }, "Progress recipient disconnected");
+                });
+            }
+          }),
       });
+      if (!("state" in terminal)) return terminal;
+      const stats = terminal.result as Awaited<ReturnType<CodeIndexer["reindexChanges"]>>;
 
       let message = `Incremental re-index complete:\n`;
       message += `- Files added: ${stats.filesAdded}\n`;
@@ -165,6 +257,37 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
     })
   );
 
+  server.registerTool(
+    "start_reindex_changes",
+    {
+      title: "Start Incremental Code Index Job",
+      description: "Schedule incremental code indexing and return immediately with a durable job record.",
+      inputSchema: schemas.StartReindexChangesSchema,
+    },
+    withToolLogging(
+      "start_reindex_changes",
+      async ({ path, operationId, sourceRevision }) => {
+        const target = await codeIndexer.getIndexTarget(path);
+        const requestFingerprint = indexJobRequestFingerprint("reindex_changes", {
+          path,
+          target,
+          sourceRevision,
+        });
+        return startJobResult(
+          await jobManager.submit({
+            operationId,
+            operation: "reindex_changes",
+            path,
+            target,
+            sourceRevision,
+            requestFingerprint,
+            run: (progress) => codeIndexer.reindexChanges(path, progress),
+          })
+        );
+      }
+    )
+  );
+
   // get_index_status
   server.registerTool(
     "get_index_status",
@@ -176,8 +299,21 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
     withToolLogging("get_index_status", async ({ path }) => {
       log.info({ tool: "get_index_status", path }, "Tool called");
       const status = await codeIndexer.getIndexStatus(path);
+      const target = await codeIndexer.getIndexTarget(path);
+      const job = await jobManager.getMostRecentForTarget(target);
+      const effectiveStatus =
+        job?.state === "queued" || job?.state === "running"
+          ? "indexing"
+          : job?.state === "failed" || job?.state === "stale"
+            ? job.state
+            : status.status;
+      const structuredContent = {
+        ...status,
+        status: effectiveStatus,
+        activeOrRecentJob: job ? publicJob(job) : null,
+      };
 
-      if (status.status === "not_indexed") {
+      if (effectiveStatus === "not_indexed") {
         return {
           content: [
             {
@@ -185,10 +321,11 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
               text: `Codebase at "${path}" is not indexed. Use index_codebase to index it first.`,
             },
           ],
+          structuredContent,
         };
       }
 
-      if (status.status === "indexing") {
+      if (effectiveStatus === "indexing") {
         return {
           content: [
             {
@@ -196,11 +333,13 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
               text: `Codebase at "${path}" is currently being indexed. ${status.chunksCount || 0} chunks processed so far.`,
             },
           ],
+          structuredContent,
         };
       }
 
       return {
-        content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
+        structuredContent,
       };
     })
   );
@@ -216,7 +355,16 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
     },
     withToolLogging("clear_index", async ({ path }) => {
       log.info({ tool: "clear_index", path }, "Tool called");
-      await codeIndexer.clearIndex(path);
+      const target = await codeIndexer.getIndexTarget(path);
+      const terminal = await runBlockingJob(jobManager, {
+        operationId: `legacy:clear_index:${randomUUID()}`,
+        operation: "clear_index",
+        path,
+        target,
+        requestFingerprint: indexJobRequestFingerprint("clear_index", { path, target }),
+        run: () => codeIndexer.clearIndex(path),
+      });
+      if (!("state" in terminal)) return terminal;
       return {
         content: [{ type: "text", text: `Index cleared for codebase at "${path}".` }],
       };

@@ -126,6 +126,9 @@ export class GitHistoryIndexer {
       this.log.info({ commitsExtracted: commits.length }, "Commits extracted");
 
       if (commits.length === 0) {
+        const latestHash = await extractor.getLatestCommitHash();
+        const synchronizer = new GitSynchronizer(absolutePath, collectionName);
+        await synchronizer.updateSnapshot(latestHash, 0);
         await this.storeIndexingMarker(collectionName, true);
         stats.status = "completed";
         stats.durationMs = Date.now() - startTime;
@@ -162,13 +165,18 @@ export class GitHistoryIndexer {
           stats.commitsIndexed++;
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          stats.errors?.push(`Failed to process commit ${commit.shortHash}: ${errorMessage}`);
+          throw new Error(`Failed to process commit ${commit.shortHash}: ${errorMessage}`, {
+            cause: error,
+          });
         }
       }
 
       stats.chunksCreated = allChunks.length;
 
       if (allChunks.length === 0) {
+        const latestHash = await extractor.getLatestCommitHash();
+        const synchronizer = new GitSynchronizer(absolutePath, collectionName);
+        await synchronizer.updateSnapshot(latestHash, stats.commitsIndexed);
         await this.storeIndexingMarker(collectionName, true);
         stats.status = "completed";
         stats.durationMs = Date.now() - startTime;
@@ -249,23 +257,17 @@ export class GitHistoryIndexer {
         }
 
         if (!success && lastError) {
-          stats.errors?.push(
-            `Failed to process batch at index ${i} after ${this.config.batchRetryAttempts} attempts: ${lastError.message}`
+          throw new Error(
+            `Failed to process batch at index ${i} after ${this.config.batchRetryAttempts} attempts`,
+            { cause: lastError }
           );
-          stats.status = "partial";
         }
       }
 
       // 6. Save snapshot for incremental updates
-      try {
-        const latestHash = await extractor.getLatestCommitHash();
-        const synchronizer = new GitSynchronizer(absolutePath, collectionName);
-        await synchronizer.updateSnapshot(latestHash, stats.commitsIndexed);
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        this.log.error({ err: error }, "Failed to save snapshot");
-        stats.errors?.push(`Snapshot save failed: ${errorMessage}`);
-      }
+      const latestHash = await extractor.getLatestCommitHash();
+      const synchronizer = new GitSynchronizer(absolutePath, collectionName);
+      await synchronizer.updateSnapshot(latestHash, stats.commitsIndexed);
 
       // Store completion marker
       await this.storeIndexingMarker(collectionName, true);
@@ -281,11 +283,8 @@ export class GitHistoryIndexer {
       );
       return stats;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      stats.status = "failed";
-      stats.errors?.push(`Indexing failed: ${errorMessage}`);
-      stats.durationMs = Date.now() - startTime;
-      return stats;
+      this.log.error({ err: error, path: absolutePath, collectionName }, "Git indexing failed");
+      throw error;
     }
   }
 
@@ -462,6 +461,8 @@ export class GitHistoryIndexer {
       throw new Error(`Git history not indexed: ${path}. Use index_git_history first.`);
     }
 
+    await this.storeIndexingMarker(collectionName, false);
+
     // Initialize synchronizer
     const synchronizer = new GitSynchronizer(absolutePath, collectionName);
     const hasSnapshot = await synchronizer.initialize();
@@ -494,6 +495,7 @@ export class GitHistoryIndexer {
     this.log.info({ newCommits: newCommits.length }, "New commits found");
 
     if (newCommits.length === 0) {
+      await this.storeIndexingMarker(collectionName, true);
       stats.durationMs = Date.now() - startTime;
       return stats;
     }
@@ -585,6 +587,8 @@ export class GitHistoryIndexer {
     const totalCommits = synchronizer.getCommitsIndexed() + newCommits.length;
     await synchronizer.updateSnapshot(latestHash, totalCommits);
 
+    await this.storeIndexingMarker(collectionName, true);
+
     stats.durationMs = Date.now() - startTime;
     return stats;
   }
@@ -611,44 +615,45 @@ export class GitHistoryIndexer {
     }
   }
 
+  async getIndexTarget(path: string): Promise<string> {
+    const absolutePath = await this.validatePath(path);
+    return `git:${await this.getCollectionName(absolutePath)}`;
+  }
+
   /**
    * Store indexing status marker in the collection
    */
   private async storeIndexingMarker(collectionName: string, complete: boolean): Promise<void> {
-    try {
-      const vectorSize = this.embeddings.getDimensions();
-      const zeroVector = new Array(vectorSize).fill(0);
+    const vectorSize = this.embeddings.getDimensions();
+    const zeroVector = new Array(vectorSize).fill(0);
 
-      const collectionInfo = await this.qdrant.getCollectionInfo(collectionName);
+    const collectionInfo = await this.qdrant.getCollectionInfo(collectionName);
 
-      const payload = {
-        _type: "git_indexing_metadata",
-        indexingComplete: complete,
-        ...(complete
-          ? { completedAt: new Date().toISOString() }
-          : { startedAt: new Date().toISOString() }),
-      };
+    const payload = {
+      _type: "git_indexing_metadata",
+      indexingComplete: complete,
+      ...(complete
+        ? { completedAt: new Date().toISOString() }
+        : { startedAt: new Date().toISOString() }),
+    };
 
-      if (collectionInfo.hybridEnabled) {
-        await this.qdrant.addPointsWithSparse(collectionName, [
-          {
-            id: GIT_INDEXING_METADATA_ID,
-            vector: zeroVector,
-            sparseVector: { indices: [], values: [] },
-            payload,
-          },
-        ]);
-      } else {
-        await this.qdrant.addPoints(collectionName, [
-          {
-            id: GIT_INDEXING_METADATA_ID,
-            vector: zeroVector,
-            payload,
-          },
-        ]);
-      }
-    } catch (error) {
-      this.log.error({ err: error }, "Failed to store indexing marker");
+    if (collectionInfo.hybridEnabled) {
+      await this.qdrant.addPointsWithSparse(collectionName, [
+        {
+          id: GIT_INDEXING_METADATA_ID,
+          vector: zeroVector,
+          sparseVector: { indices: [], values: [] },
+          payload,
+        },
+      ]);
+    } else {
+      await this.qdrant.addPoints(collectionName, [
+        {
+          id: GIT_INDEXING_METADATA_ID,
+          vector: zeroVector,
+          payload,
+        },
+      ]);
     }
   }
 

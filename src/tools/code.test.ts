@@ -55,21 +55,53 @@ describe("registerCodeTools", () => {
     const snapshotError = new SnapshotSaveError(snapshotPath, permissionError);
     const mockServer = { registerTool: vi.fn() };
     const codeIndexer = {
+      getIndexTarget: vi.fn().mockResolvedValue("code:test"),
       indexCodebase: vi.fn().mockRejectedValue(snapshotError),
     };
+    let terminalJob: any;
+    const jobManager = {
+      submit: vi.fn(async (request) => {
+        try {
+          await request.run(vi.fn());
+        } catch (error) {
+          terminalJob = {
+            jobId: "job-1",
+            operationId: request.operationId,
+            operation: request.operation,
+            path: request.path,
+            target: request.target,
+            state: "failed",
+            createdAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            progress: null,
+            result: null,
+            error: { name: "SnapshotSaveError", message: (error as Error).message, code: "EACCES" },
+          };
+        }
+        return { accepted: true, deduplicated: false, job: terminalJob };
+      }),
+      waitForTerminal: vi.fn(async () => terminalJob),
+    };
 
-    registerCodeTools(mockServer as any, { codeIndexer: codeIndexer as any });
+    registerCodeTools(mockServer as any, {
+      codeIndexer: codeIndexer as any,
+      jobManager: jobManager as any,
+    });
     const registration = mockServer.registerTool.mock.calls.find(
       ([name]) => name === "index_codebase"
     );
     expect(registration).toBeDefined();
 
     const handler = registration?.[2];
-    await expect(
-      handler(
+    const result = await handler(
         { path: "/sources/repository", forceReindex: false },
         { _meta: {}, sendNotification: vi.fn() }
-      )
-    ).rejects.toBe(snapshotError);
+      );
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        job: { state: "failed", error: { code: "EACCES" } },
+      },
+    });
   });
 });

@@ -5,6 +5,11 @@
 
 A Model Context Protocol (MCP) server providing semantic search capabilities using Qdrant vector database with multiple embedding providers.
 
+> **Deployment scope for this fork:** This version is supported only as a Docker
+> container using the HTTP MCP transport. `/data` must be mounted read-write from
+> persistent host storage. Direct host execution and stdio transport are not
+> supported deployment modes for this fork.
+
 ## Features
 
 - **Zero Setup**: Works out of the box with Ollama - no API keys required
@@ -20,7 +25,7 @@ A Model Context Protocol (MCP) server providing semantic search capabilities usi
 - **Rate Limiting**: Intelligent throttling with exponential backoff
 - **Full CRUD**: Create, search, and manage collections and documents
 - **Structured Logging**: JSON logging via Pino with configurable log levels
-- **Flexible Deployment**: Run locally (stdio) or as a remote HTTP server
+- **Containerized HTTP Deployment**: Runs as a remote HTTP MCP server with persistent state under `/data`
 - **API Key Authentication**: Connect to secured Qdrant instances (Qdrant Cloud, self-hosted with API keys)
 
 ## Quick Start
@@ -57,7 +62,12 @@ npm run build
 
 ### Configuration
 
-#### Local Setup (stdio transport)
+#### Unsupported: local stdio transport
+
+The upstream project supports direct stdio execution. This fork does not. Use the
+Docker HTTP deployment below with a writable persistent `/data` mount.
+
+<!-- Upstream reference retained for historical context.
 
 ```bash
 claude mcp add --transport stdio qdrant -- node /path/to/qdrant-mcp-server/build/index.js
@@ -87,7 +97,9 @@ Create a collection called "notes" and add a document about machine learning
 
 **Enable example prompts:** Copy `prompts.example.json` to `prompts.json` and restart. Use `/prompt` to list available prompts.
 
-#### Remote Setup (HTTP transport)
+-->
+
+#### Supported Setup (Docker with HTTP transport)
 
 > **⚠️ Security Warning**: When deploying the HTTP transport in production:
 >
@@ -162,8 +174,10 @@ See [Advanced Configuration](#advanced-configuration) section below for all opti
 | Tool               | Description                                                                |
 | ------------------ | -------------------------------------------------------------------------- |
 | `index_codebase`   | Index a codebase for semantic code search with AST-aware chunking          |
+| `start_index_codebase` | Start durable full code indexing and return a job immediately          |
 | `search_code`      | Search indexed codebase using natural language queries                     |
 | `reindex_changes`  | Incrementally re-index only changed files (detects added/modified/deleted) |
+| `start_reindex_changes` | Start durable incremental code indexing and return a job immediately   |
 | `get_index_status` | Get indexing status and statistics for a codebase                          |
 | `clear_index`      | Delete all indexed data for a codebase                                     |
 
@@ -172,10 +186,69 @@ See [Advanced Configuration](#advanced-configuration) section below for all opti
 | Tool                   | Description                                                              |
 | ---------------------- | ------------------------------------------------------------------------ |
 | `index_git_history`    | Index git commit history for semantic search over past changes and fixes |
+| `start_index_git_history` | Start durable full git-history indexing and return a job immediately  |
 | `search_git_history`   | Search indexed git history using natural language queries                |
 | `index_new_commits`    | Incrementally index only new commits since last indexing                 |
+| `start_index_new_commits` | Start durable incremental git indexing and return a job immediately   |
 | `get_git_index_status` | Get indexing status and statistics for a repository's git history        |
 | `clear_git_index`      | Delete all indexed git history data for a repository                     |
+
+### Durable background indexing
+
+For automation and remote HTTP clients, prefer the four `start_*` indexing tools.
+They durably register a process-level job and return without waiting for scanning,
+embedding, Qdrant writes, snapshot persistence, or completion-marker storage. Use a
+client-generated `operationId` that is unique to one logical indexing attempt, and
+reuse that same value whenever retrying a request whose response may have been lost.
+An operation ID is permanently bound, for the lifetime of its retained job record,
+to the operation, canonical path, resolved target, source revision, and effective
+options of its original request. Repeating the same request returns the existing job,
+so the underlying indexer executes only once. Reusing that operation ID with any
+different request field returns the structured result
+`{ "accepted": false, "deduplicated": false, "reason": "operation_id_conflict", "job": { ... } }`
+and does not execute the new request.
+
+Poll `get_index_job_status` with the returned `jobId`. Its `structuredContent` is
+authoritative; human-readable `content` is only a summary. Job states are:
+
+| State | Meaning |
+| ----- | ------- |
+| `queued` | Registered and waiting to start |
+| `running` | Actively indexing; inspect `heartbeatAt` and `progress` |
+| `completed` | Qdrant operations, atomic snapshot, and completion marker all succeeded |
+| `failed` | Execution failed; inspect `error` and retry with a new `operationId` after correcting the cause |
+| `cancelled` | Reserved terminal state for cancelled work; no cancellation tool is currently exposed |
+| `stale` | The daemon restarted while the persisted record was queued or running; execution is no longer active |
+
+Only one indexing or clearing operation may use the same derived target/collection
+at a time. A conflicting start returns `accepted: false` with
+`reason: "target_busy"`; different targets can run concurrently. Clear tools use
+the same lock and return the same structured busy result instead of racing an
+active indexer.
+
+Job metadata is atomically persisted to `/data/jobs/index-jobs.json`, using the
+existing writable MCP state volume. The `jobs` directory is created automatically.
+`INDEX_JOB_STORE_PATH` remains available as an optional override. Terminal records
+are retained for seven days by default, with at most 1,000 terminal records kept.
+Configure these bounds with `INDEX_JOB_TERMINAL_RETENTION_MS` and
+`INDEX_JOB_MAX_TERMINAL_RECORDS`; both must be positive integers. Queued and running
+jobs, and terminal jobs still being awaited by a blocking caller, are never pruned.
+Because operation-ID records are removed with pruned jobs, idempotency is guaranteed
+only for the configured retention window. Reusing an old `operationId` after its
+terminal record has been pruned can start a new job.
+
+On startup,
+persisted `queued` or `running` jobs
+are changed to `stale`; the server never claims that work survived a process
+restart. Reconcile the source and index status, then submit a new logical attempt
+with a new `operationId`.
+
+The older blocking tools remain available. They execute through the same job
+manager and single-flight lock, but wait for the terminal result for compatibility.
+Closing an MCP transport or reaching an HTTP/client waiting timeout does not cancel
+the registered job. It only means that caller stopped waiting; poll the job status
+instead of treating the timeout as an indexing failure or immediately starting a
+new operation.
 
 ### Advanced Search
 
@@ -420,7 +493,7 @@ get_index_status({
 
 // Output:
 // {
-//   status: "indexed",      // "not_indexed" | "indexing" | "indexed"
+//   status: "indexed",      // "not_indexed" | "indexing" | "indexed" | "failed" | "stale"
 //   isIndexed: true,        // deprecated: use status instead
 //   collectionName: "code_a3f8d2e1",
 //   chunksCount: 1823,
@@ -564,6 +637,9 @@ See [examples/](examples/) directory for detailed guides:
 | `QDRANT_API_KEY`          | API key for Qdrant authentication                        | -                     |
 | `LOG_LEVEL`               | Logging level (fatal/error/warn/info/debug/trace/silent) | info                  |
 | `PROMPTS_CONFIG_FILE`     | Path to prompts configuration JSON                       | prompts.json          |
+| `INDEX_JOB_STORE_PATH`    | Optional durable background-job metadata JSON override    | /data/jobs/index-jobs.json |
+| `INDEX_JOB_TERMINAL_RETENTION_MS` | Maximum terminal-job age in milliseconds | 604800000 (7 days) |
+| `INDEX_JOB_MAX_TERMINAL_RECORDS` | Maximum retained terminal-job records | 1000 |
 
 #### Embedding Configuration
 

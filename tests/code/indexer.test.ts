@@ -496,9 +496,7 @@ describe("CodeIndexer", () => {
         return originalReadFile(path, ...args);
       });
 
-      const stats = await indexer.indexCodebase(codebaseDir);
-
-      expect(stats.errors?.some((e) => e.includes("Permission denied"))).toBe(true);
+      await expect(indexer.indexCodebase(codebaseDir)).rejects.toThrow("Permission denied");
 
       vi.restoreAllMocks();
     });
@@ -696,12 +694,12 @@ function checkStatus(): boolean {
 
         const stats = await indexer.indexCodebase(emptyDir);
 
-        // No files to index means no collection is created
+        // An empty but successfully indexed source still gets an authoritative marker.
         expect(stats.filesScanned).toBe(0);
 
         const status = await indexer.getIndexStatus(emptyDir);
-        expect(status.status).toBe("not_indexed");
-        expect(status.isIndexed).toBe(false);
+        expect(status.status).toBe("indexed");
+        expect(status.isIndexed).toBe(true);
       });
     });
 
@@ -1513,11 +1511,7 @@ export function process() {
       };
 
       try {
-        const stats = await indexer.indexCodebase(codebaseDir);
-
-        // Should handle the error gracefully
-        expect(stats.status).toBe("completed");
-        expect(stats.errors?.some((e) => e.includes("String error"))).toBe(true);
+        await expect(indexer.indexCodebase(codebaseDir)).rejects.toThrow("String error");
       } finally {
         // Restore original function
         fs.readFile = originalReadFile;
