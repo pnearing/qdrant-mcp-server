@@ -304,14 +304,25 @@ export class IndexJobManager {
   }
 
   async waitForTerminal(jobId: string): Promise<IndexJobRecord> {
-    const current = await this.get(jobId);
-    if (!current) throw new Error(`Index job not found: ${jobId}`);
-    if (TERMINAL_STATES.has(current.state)) return current;
-    return new Promise((resolve) => {
-      const waiters = this.waiters.get(jobId) ?? [];
-      waiters.push(resolve);
-      this.waiters.set(jobId, waiters);
+    return new Promise<IndexJobRecord>((resolve, reject) => {
+      void this.serialized(async () => {
+        const current = this.jobs.get(jobId);
+        if (!current) throw new Error(`Index job not found: ${jobId}`);
+        if (TERMINAL_STATES.has(current.state)) {
+          resolve(this.clone(current));
+          return;
+        }
+
+        this.beforeTerminalWaiterRegistered(jobId);
+        const waiters = this.waiters.get(jobId) ?? [];
+        waiters.push(resolve);
+        this.waiters.set(jobId, waiters);
+      }).catch(reject);
     });
+  }
+
+  protected beforeTerminalWaiterRegistered(_jobId: string): void {
+    // Test seam for forcing completion at the state-check/registration boundary.
   }
 
   private async run(

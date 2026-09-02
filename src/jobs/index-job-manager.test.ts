@@ -185,6 +185,7 @@ describe("IndexJobManager", () => {
     const terminal = manager.waitForTerminal(active.job.jobId);
     release();
     await terminal;
+    await manager.get("waiting");
   });
 
   it("leaves the previous valid store intact when pruning persistence fails", async () => {
@@ -428,6 +429,79 @@ describe("IndexJobManager", () => {
       manager.waitForTerminal(first.job.jobId),
       manager.waitForTerminal(second.job.jobId),
     ]);
+  });
+
+  it("does not lose completion triggered during terminal-waiter registration", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const registrationHook = vi.fn(() => release());
+    class RegistrationRaceManager extends IndexJobManager {
+      protected override beforeTerminalWaiterRegistered(): void {
+        registrationHook();
+      }
+    }
+    const manager = new RegistrationRaceManager(storePath);
+    await manager.initialize();
+    const submitted = await manager.submit({
+      operationId: "registration-race",
+      operation: "index_codebase",
+      path: "/repo/a",
+      target: "code:a",
+      run: async () => {
+        await blocked;
+        return { indexed: true };
+      },
+    });
+    await vi.waitFor(async () => {
+      expect(await manager.get(submitted.job.jobId)).toMatchObject({ state: "running" });
+    });
+
+    await expect(manager.waitForTerminal(submitted.job.jobId)).resolves.toMatchObject({
+      state: "completed",
+      result: { indexed: true },
+    });
+    expect(registrationHook).toHaveBeenCalledOnce();
+    expect(
+      (manager as unknown as { waiters: Map<string, unknown> }).waiters.has(submitted.job.jobId)
+    ).toBe(false);
+  });
+
+  it("resolves every concurrent terminal waiter exactly once and cleans them up", async () => {
+    const manager = new IndexJobManager(storePath);
+    await manager.initialize();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const submitted = await manager.submit({
+      operationId: "multiple-waiters",
+      operation: "index_codebase",
+      path: "/repo/a",
+      target: "code:a",
+      run: async () => blocked,
+    });
+    const waiterOne = vi.fn();
+    const waiterTwo = vi.fn();
+    const first = manager.waitForTerminal(submitted.job.jobId).then(waiterOne);
+    const second = manager.waitForTerminal(submitted.job.jobId).then(waiterTwo);
+    release();
+    await Promise.all([first, second]);
+
+    expect(waiterOne).toHaveBeenCalledOnce();
+    expect(waiterTwo).toHaveBeenCalledOnce();
+    expect(
+      (manager as unknown as { waiters: Map<string, unknown> }).waiters.has(submitted.job.jobId)
+    ).toBe(false);
+  });
+
+  it("rejects terminal waits for unknown job ids", async () => {
+    const manager = new IndexJobManager(storePath);
+    await manager.initialize();
+    await expect(manager.waitForTerminal("missing")).rejects.toThrow(
+      "Index job not found: missing"
+    );
   });
 
   it("records failures without producing an unhandled rejection", async () => {
