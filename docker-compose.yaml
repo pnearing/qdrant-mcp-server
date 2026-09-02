@@ -1,5 +1,5 @@
 services:
-  qdrant-mcp:
+  qdrant-mcp-server:
     image: qdrant-mcp-server:v3.3.5-unprivileged
 
     build:
@@ -11,6 +11,7 @@ services:
     env_file:
       - .env
     environment:
+      HOME: /data
       HTTP_REQUEST_TIMEOUT_MS: 3600000
       # Logging
       LOG_LEVEL: "debug"
@@ -23,6 +24,7 @@ services:
 
     volumes:
       - "${SOURCES_PATH}:/sources:rw"
+      - "${MCP_STATE_PATH:?MCP_STATE_PATH is required}:/data:rw"
 
     ports:
       - "3001:3000"

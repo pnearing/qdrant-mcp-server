@@ -12,7 +12,7 @@ RUN apt-get update \
         g++
 
 RUN git -c advice.detachedHead=false clone --depth 1 \
-#    --branch "${QDRANT_MCP_BRANCH}" \
+    --branch "${QDRANT_MCP_BRANCH}" \
     https://github.com/pnearing/qdrant-mcp-server.git \
     /src/qdrant-mcp-server
 
