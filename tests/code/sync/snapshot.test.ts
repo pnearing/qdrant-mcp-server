@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MerkleTree } from "../../../src/code/sync/merkle.js";
 import { SnapshotManager } from "../../../src/code/sync/snapshot.js";
 
@@ -24,6 +24,7 @@ describe("SnapshotManager", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     // Clean up temporary directory
     try {
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -91,6 +92,35 @@ describe("SnapshotManager", () => {
       expect(loaded?.codebasePath).toBe("/test/codebase2");
       expect(loaded?.fileHashes.size).toBe(1);
       expect(loaded?.fileHashes.get("file2.ts")).toBe("hash2");
+    });
+
+    it("should preserve the last valid snapshot and error context when atomic replacement fails", async () => {
+      const originalHashes = new Map([["original.ts", "original-hash"]]);
+      const originalTree = new MerkleTree();
+      originalTree.build(originalHashes);
+      await snapshotManager.save("/test/original", originalHashes, originalTree);
+
+      const replacementHashes = new Map([["replacement.ts", "replacement-hash"]]);
+      const replacementTree = new MerkleTree();
+      replacementTree.build(replacementHashes);
+      const permissionError = Object.assign(
+        new Error("EACCES: permission denied, rename snapshot"),
+        { code: "EACCES" }
+      );
+      vi.spyOn(fs, "rename").mockRejectedValueOnce(permissionError);
+
+      await expect(
+        snapshotManager.save("/test/replacement", replacementHashes, replacementTree)
+      ).rejects.toMatchObject({
+        name: "SnapshotSaveError",
+        code: "EACCES",
+        snapshotPath: join(tempDir, `${collectionName}.json`),
+        cause: permissionError,
+      });
+
+      const loaded = await snapshotManager.load();
+      expect(loaded?.codebasePath).toBe("/test/original");
+      expect(loaded?.fileHashes).toEqual(originalHashes);
     });
 
     it("should create snapshot directory if it doesn't exist", async () => {

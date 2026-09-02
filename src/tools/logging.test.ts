@@ -85,6 +85,7 @@ describe("withToolLogging", () => {
       }),
       "Tool threw an error"
     );
+    expect(mockLog.info).not.toHaveBeenCalled();
   });
 
   it('should log warn for search tool with "No results found" response', async () => {

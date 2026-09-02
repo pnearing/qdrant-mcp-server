@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { formatCodeSearchResults } from "./code.js";
+import { describe, expect, it, vi } from "vitest";
+import { SnapshotSaveError } from "../code/sync/snapshot.js";
+import { formatCodeSearchResults, registerCodeTools } from "./code.js";
 
 describe("formatCodeSearchResults", () => {
   it("identifies repository, branch, and abbreviated indexing commit", () => {
@@ -41,5 +42,34 @@ describe("formatCodeSearchResults", () => {
     expect(output).not.toContain("Branch:");
     expect(output).not.toContain("Commit:");
     expect(output).toContain("File: file.txt:1-1");
+  });
+});
+
+describe("registerCodeTools", () => {
+  it("propagates snapshot persistence failures through the MCP tool handler", async () => {
+    const snapshotPath = "/data/.qdrant-mcp/snapshots/code_test.json";
+    const permissionError = Object.assign(
+      new Error("EACCES: permission denied, mkdir '/data/.qdrant-mcp'"),
+      { code: "EACCES", path: snapshotPath }
+    );
+    const snapshotError = new SnapshotSaveError(snapshotPath, permissionError);
+    const mockServer = { registerTool: vi.fn() };
+    const codeIndexer = {
+      indexCodebase: vi.fn().mockRejectedValue(snapshotError),
+    };
+
+    registerCodeTools(mockServer as any, { codeIndexer: codeIndexer as any });
+    const registration = mockServer.registerTool.mock.calls.find(
+      ([name]) => name === "index_codebase"
+    );
+    expect(registration).toBeDefined();
+
+    const handler = registration?.[2];
+    await expect(
+      handler(
+        { path: "/sources/repository", forceReindex: false },
+        { _meta: {}, sendNotification: vi.fn() }
+      )
+    ).rejects.toBe(snapshotError);
   });
 });
