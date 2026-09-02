@@ -165,7 +165,9 @@ export class GitHistoryIndexer {
           stats.commitsIndexed++;
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          stats.errors?.push(`Failed to process commit ${commit.shortHash}: ${errorMessage}`);
+          throw new Error(`Failed to process commit ${commit.shortHash}: ${errorMessage}`, {
+            cause: error,
+          });
         }
       }
 

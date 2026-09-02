@@ -565,7 +565,7 @@ describe("GitHistoryIndexer", () => {
   });
 
   describe("indexHistory - error handling", () => {
-    it("should handle commit processing errors gracefully", async () => {
+    it("should reject commit processing errors before snapshot advancement", async () => {
       const mockCommits = [
         {
           hash: "abc123",
@@ -586,10 +586,10 @@ describe("GitHistoryIndexer", () => {
       mockExtractorInstance.getCommits.mockResolvedValue(mockCommits);
       mockExtractorInstance.getCommitDiff.mockRejectedValue(new Error("Diff extraction failed"));
 
-      const stats = await indexer.indexHistory("/test/repo");
-
-      expect(stats.errors).toBeDefined();
-      expect(stats.errors?.some((e) => e.includes("abc12"))).toBe(true);
+      await expect(indexer.indexHistory("/test/repo")).rejects.toThrow(
+        "Failed to process commit abc12: Diff extraction failed"
+      );
+      expect(mockSynchronizerInstance.updateSnapshot).not.toHaveBeenCalled();
     });
 
     it("should handle batch embedding errors with partial status", async () => {

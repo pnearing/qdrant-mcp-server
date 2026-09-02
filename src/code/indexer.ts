@@ -116,12 +116,6 @@ export class CodeIndexer {
       stats.filesScanned = files.length;
       this.log.info({ filesFound: files.length }, "File scan complete");
 
-      if (files.length === 0) {
-        stats.status = "completed";
-        stats.durationMs = Date.now() - startTime;
-        return stats;
-      }
-
       // 2. Create or verify collection
       const collectionExists = await this.qdrant.collectionExists(collectionName);
 
@@ -203,7 +197,7 @@ export class CodeIndexer {
           stats.filesIndexed++;
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          stats.errors?.push(`Failed to process ${filePath}: ${errorMessage}`);
+          throw new Error(`Failed to process ${filePath}: ${errorMessage}`, { cause: error });
         }
       }
 
