@@ -75,7 +75,7 @@ export type SubmitIndexJobResult =
   | {
       accepted: false;
       deduplicated: false;
-      reason: "target_busy";
+      reason: "target_busy" | "operation_id_conflict";
       job: IndexJobRecord;
     };
 
@@ -194,12 +194,29 @@ export class IndexJobManager {
   async submit(request: SubmitIndexJobRequest): Promise<SubmitIndexJobResult> {
     const result = await this.serialized(async () => {
       await this.pruneTerminalJobs();
+      const requestFingerprint =
+        request.requestFingerprint ??
+        JSON.stringify({
+          operation: request.operation,
+          path: request.path,
+          target: request.target,
+          sourceRevision: request.sourceRevision ?? null,
+        });
       const duplicateId = this.jobsByOperationId.get(request.operationId);
       if (duplicateId) {
+        const duplicate = this.jobs.get(duplicateId)!;
+        if (duplicate.requestFingerprint !== requestFingerprint) {
+          return {
+            accepted: false as const,
+            deduplicated: false as const,
+            reason: "operation_id_conflict" as const,
+            job: this.clone(duplicate),
+          };
+        }
         return {
           accepted: true as const,
           deduplicated: true,
-          job: this.clone(this.jobs.get(duplicateId)!),
+          job: this.clone(duplicate),
         };
       }
 
@@ -209,8 +226,7 @@ export class IndexJobManager {
         if (
           request.joinActiveOperation &&
           activeJob.operation === request.operation &&
-          request.requestFingerprint !== undefined &&
-          activeJob.requestFingerprint === request.requestFingerprint
+          activeJob.requestFingerprint === requestFingerprint
         ) {
           return { accepted: true as const, deduplicated: true, job: this.clone(activeJob) };
         }
@@ -229,7 +245,7 @@ export class IndexJobManager {
         operation: request.operation,
         path: request.path,
         target: request.target,
-        ...(request.requestFingerprint && { requestFingerprint: request.requestFingerprint }),
+        requestFingerprint,
         ...(request.sourceRevision && { sourceRevision: request.sourceRevision }),
         state: "queued",
         createdAt,

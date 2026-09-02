@@ -48,9 +48,13 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
           path,
           target,
           requestFingerprint: indexJobRequestFingerprint("index_git_history", {
-            forceReindex,
-            sinceDate,
-            maxCommits,
+            path,
+            target,
+            options: {
+              forceReindex: forceReindex ?? false,
+              sinceDate: sinceDate ?? null,
+              maxCommits: maxCommits ?? null,
+            },
           }),
           run: (updateProgress) =>
             gitHistoryIndexer.indexHistory(
@@ -110,6 +114,16 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
       "start_index_git_history",
       async ({ path, operationId, sourceRevision, forceReindex, sinceDate, maxCommits }) => {
         const target = await gitHistoryIndexer.getIndexTarget(path);
+        const requestFingerprint = indexJobRequestFingerprint("index_git_history", {
+          path,
+          target,
+          sourceRevision,
+          options: {
+            forceReindex: forceReindex ?? false,
+            sinceDate: sinceDate ?? null,
+            maxCommits: maxCommits ?? null,
+          },
+        });
         return startJobResult(
           await jobManager.submit({
             operationId,
@@ -117,6 +131,7 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
             path,
             target,
             sourceRevision,
+            requestFingerprint,
             run: (progress) =>
               gitHistoryIndexer.indexHistory(path, { forceReindex, sinceDate, maxCommits }, progress),
           })
@@ -201,7 +216,7 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
         operation: "index_new_commits",
         path,
         target,
-        requestFingerprint: indexJobRequestFingerprint("index_new_commits"),
+        requestFingerprint: indexJobRequestFingerprint("index_new_commits", { path, target }),
         run: (updateProgress) =>
           gitHistoryIndexer.indexNewCommits(path, (progress) => {
             updateProgress(progress);
@@ -255,6 +270,11 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
       "start_index_new_commits",
       async ({ path, operationId, sourceRevision }) => {
         const target = await gitHistoryIndexer.getIndexTarget(path);
+        const requestFingerprint = indexJobRequestFingerprint("index_new_commits", {
+          path,
+          target,
+          sourceRevision,
+        });
         return startJobResult(
           await jobManager.submit({
             operationId,
@@ -262,6 +282,7 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
             path,
             target,
             sourceRevision,
+            requestFingerprint,
             run: (progress) => gitHistoryIndexer.indexNewCommits(path, progress),
           })
         );
@@ -356,7 +377,7 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
         operation: "clear_git_index",
         path,
         target,
-        requestFingerprint: indexJobRequestFingerprint("clear_git_index"),
+        requestFingerprint: indexJobRequestFingerprint("clear_git_index", { path, target }),
         run: () => gitHistoryIndexer.clearIndex(path),
       });
       if (!("state" in terminal)) return terminal;

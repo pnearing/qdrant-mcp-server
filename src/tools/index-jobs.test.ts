@@ -150,6 +150,55 @@ describe("durable index-job MCP tools", () => {
     await manager.waitForTerminal((first.structuredContent as any).job.jobId);
   });
 
+  it("returns operation_id_conflict when an async operation id is reused for new options", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    codeIndexer.indexCodebase.mockImplementation(async () => {
+      await blocked;
+      return {
+        filesScanned: 1,
+        filesIndexed: 1,
+        chunksCreated: 1,
+        durationMs: 1,
+        status: "completed",
+      };
+    });
+
+    const first = await client.callTool({
+      name: "start_index_codebase",
+      arguments: {
+        path: "/repo/a",
+        operationId: "immutable-async-id",
+        sourceRevision: "abc123",
+        extensions: [".ts", ".js"],
+      },
+    });
+    const conflict = await client.callTool({
+      name: "start_index_codebase",
+      arguments: {
+        path: "/repo/a",
+        operationId: "immutable-async-id",
+        sourceRevision: "def456",
+        extensions: [".py"],
+      },
+    });
+
+    expect(conflict.structuredContent).toMatchObject({
+      accepted: false,
+      deduplicated: false,
+      reason: "operation_id_conflict",
+      job: {
+        jobId: (first.structuredContent as any).job.jobId,
+        operationId: "immutable-async-id",
+      },
+    });
+    expect(codeIndexer.indexCodebase).toHaveBeenCalledTimes(1);
+    release();
+    await manager.waitForTerminal((first.structuredContent as any).job.jobId);
+  });
+
   it("exposes progress and explicit structured status", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => {

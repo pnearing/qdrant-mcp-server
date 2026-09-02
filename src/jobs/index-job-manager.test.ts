@@ -308,6 +308,42 @@ describe("IndexJobManager", () => {
     await manager.waitForTerminal(first.job.jobId);
   });
 
+  it("rejects reuse of an operation id for a different request fingerprint", async () => {
+    const manager = new IndexJobManager(storePath);
+    await manager.initialize();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = await manager.submit({
+      operationId: "immutable-request",
+      operation: "index_codebase",
+      path: "/repo/a",
+      target: "code:a",
+      sourceRevision: "abc123",
+      requestFingerprint: "fingerprint-a",
+      run: async () => blocked,
+    });
+    const conflict = await manager.submit({
+      operationId: "immutable-request",
+      operation: "index_codebase",
+      path: "/repo/b",
+      target: "code:b",
+      sourceRevision: "def456",
+      requestFingerprint: "fingerprint-b",
+      run: async () => undefined,
+    });
+
+    expect(conflict).toMatchObject({
+      accepted: false,
+      deduplicated: false,
+      reason: "operation_id_conflict",
+      job: { jobId: first.job.jobId, operationId: "immutable-request" },
+    });
+    release();
+    await manager.waitForTerminal(first.job.jobId);
+  });
+
   it("joins only active legacy requests with the same request fingerprint", async () => {
     const manager = new IndexJobManager(storePath);
     await manager.initialize();

@@ -200,8 +200,13 @@ They durably register a process-level job and return without waiting for scannin
 embedding, Qdrant writes, snapshot persistence, or completion-marker storage. Use a
 client-generated `operationId` that is unique to one logical indexing attempt, and
 reuse that same value whenever retrying a request whose response may have been lost.
-The server returns the existing job for a repeated `operationId`, so the underlying
-indexer executes only once.
+An operation ID is permanently bound, for the lifetime of its retained job record,
+to the operation, canonical path, resolved target, source revision, and effective
+options of its original request. Repeating the same request returns the existing job,
+so the underlying indexer executes only once. Reusing that operation ID with any
+different request field returns the structured result
+`{ "accepted": false, "deduplicated": false, "reason": "operation_id_conflict", "job": { ... } }`
+and does not execute the new request.
 
 Poll `get_index_job_status` with the returned `jobId`. Its `structuredContent` is
 authoritative; human-readable `content` is only a summary. Job states are:

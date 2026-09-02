@@ -64,9 +64,13 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
           path,
           target,
           requestFingerprint: indexJobRequestFingerprint("index_codebase", {
-            forceReindex,
-            extensions,
-            ignorePatterns,
+            path,
+            target,
+            options: {
+              forceReindex: forceReindex ?? false,
+              extensions: extensions ?? null,
+              ignorePatterns: ignorePatterns ?? null,
+            },
           }),
           run: (updateProgress) =>
             codeIndexer.indexCodebase(
@@ -126,6 +130,16 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
       "start_index_codebase",
       async ({ path, operationId, sourceRevision, forceReindex, extensions, ignorePatterns }) => {
         const target = await codeIndexer.getIndexTarget(path);
+        const requestFingerprint = indexJobRequestFingerprint("index_codebase", {
+          path,
+          target,
+          sourceRevision,
+          options: {
+            forceReindex: forceReindex ?? false,
+            extensions: extensions ?? null,
+            ignorePatterns: ignorePatterns ?? null,
+          },
+        });
         return startJobResult(
           await jobManager.submit({
             operationId,
@@ -133,6 +147,7 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
             path,
             target,
             sourceRevision,
+            requestFingerprint,
             run: (progress) =>
               codeIndexer.indexCodebase(path, { forceReindex, extensions, ignorePatterns }, progress),
           })
@@ -197,7 +212,7 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
         operation: "reindex_changes",
         path,
         target,
-        requestFingerprint: indexJobRequestFingerprint("reindex_changes"),
+        requestFingerprint: indexJobRequestFingerprint("reindex_changes", { path, target }),
         run: (updateProgress) =>
           codeIndexer.reindexChanges(path, (progress) => {
             updateProgress(progress);
@@ -253,6 +268,11 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
       "start_reindex_changes",
       async ({ path, operationId, sourceRevision }) => {
         const target = await codeIndexer.getIndexTarget(path);
+        const requestFingerprint = indexJobRequestFingerprint("reindex_changes", {
+          path,
+          target,
+          sourceRevision,
+        });
         return startJobResult(
           await jobManager.submit({
             operationId,
@@ -260,6 +280,7 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
             path,
             target,
             sourceRevision,
+            requestFingerprint,
             run: (progress) => codeIndexer.reindexChanges(path, progress),
           })
         );
@@ -340,7 +361,7 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
         operation: "clear_index",
         path,
         target,
-        requestFingerprint: indexJobRequestFingerprint("clear_index"),
+        requestFingerprint: indexJobRequestFingerprint("clear_index", { path, target }),
         run: () => codeIndexer.clearIndex(path),
       });
       if (!("state" in terminal)) return terminal;
