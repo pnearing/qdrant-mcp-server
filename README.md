@@ -162,8 +162,10 @@ See [Advanced Configuration](#advanced-configuration) section below for all opti
 | Tool               | Description                                                                |
 | ------------------ | -------------------------------------------------------------------------- |
 | `index_codebase`   | Index a codebase for semantic code search with AST-aware chunking          |
+| `start_index_codebase` | Start durable full code indexing and return a job immediately          |
 | `search_code`      | Search indexed codebase using natural language queries                     |
 | `reindex_changes`  | Incrementally re-index only changed files (detects added/modified/deleted) |
+| `start_reindex_changes` | Start durable incremental code indexing and return a job immediately   |
 | `get_index_status` | Get indexing status and statistics for a codebase                          |
 | `clear_index`      | Delete all indexed data for a codebase                                     |
 
@@ -172,10 +174,54 @@ See [Advanced Configuration](#advanced-configuration) section below for all opti
 | Tool                   | Description                                                              |
 | ---------------------- | ------------------------------------------------------------------------ |
 | `index_git_history`    | Index git commit history for semantic search over past changes and fixes |
+| `start_index_git_history` | Start durable full git-history indexing and return a job immediately  |
 | `search_git_history`   | Search indexed git history using natural language queries                |
 | `index_new_commits`    | Incrementally index only new commits since last indexing                 |
+| `start_index_new_commits` | Start durable incremental git indexing and return a job immediately   |
 | `get_git_index_status` | Get indexing status and statistics for a repository's git history        |
 | `clear_git_index`      | Delete all indexed git history data for a repository                     |
+
+### Durable background indexing
+
+For automation and remote HTTP clients, prefer the four `start_*` indexing tools.
+They durably register a process-level job and return without waiting for scanning,
+embedding, Qdrant writes, snapshot persistence, or completion-marker storage. Use a
+client-generated `operationId` that is unique to one logical indexing attempt, and
+reuse that same value whenever retrying a request whose response may have been lost.
+The server returns the existing job for a repeated `operationId`, so the underlying
+indexer executes only once.
+
+Poll `get_index_job_status` with the returned `jobId`. Its `structuredContent` is
+authoritative; human-readable `content` is only a summary. Job states are:
+
+| State | Meaning |
+| ----- | ------- |
+| `queued` | Registered and waiting to start |
+| `running` | Actively indexing; inspect `heartbeatAt` and `progress` |
+| `completed` | Qdrant operations, atomic snapshot, and completion marker all succeeded |
+| `failed` | Execution failed; inspect `error` and retry with a new `operationId` after correcting the cause |
+| `cancelled` | Reserved terminal state for cancelled work; no cancellation tool is currently exposed |
+| `stale` | The daemon restarted while the persisted record was queued or running; execution is no longer active |
+
+Only one indexing or clearing operation may use the same derived target/collection
+at a time. A conflicting start returns `accepted: false` with
+`reason: "target_busy"`; different targets can run concurrently. Clear tools use
+the same lock and return the same structured busy result instead of racing an
+active indexer.
+
+Job metadata is atomically persisted to `INDEX_JOB_STORE_PATH` (default
+`~/.qdrant-mcp/jobs/index-jobs.json`). Mount the containing directory on durable,
+writable storage in containers. On startup, persisted `queued` or `running` jobs
+are changed to `stale`; the server never claims that work survived a process
+restart. Reconcile the source and index status, then submit a new logical attempt
+with a new `operationId`.
+
+The older blocking tools remain available. They execute through the same job
+manager and single-flight lock, but wait for the terminal result for compatibility.
+Closing an MCP transport or reaching an HTTP/client waiting timeout does not cancel
+the registered job. It only means that caller stopped waiting; poll the job status
+instead of treating the timeout as an indexing failure or immediately starting a
+new operation.
 
 ### Advanced Search
 
@@ -420,7 +466,7 @@ get_index_status({
 
 // Output:
 // {
-//   status: "indexed",      // "not_indexed" | "indexing" | "indexed"
+//   status: "indexed",      // "not_indexed" | "indexing" | "indexed" | "failed" | "stale"
 //   isIndexed: true,        // deprecated: use status instead
 //   collectionName: "code_a3f8d2e1",
 //   chunksCount: 1823,
@@ -564,6 +610,7 @@ See [examples/](examples/) directory for detailed guides:
 | `QDRANT_API_KEY`          | API key for Qdrant authentication                        | -                     |
 | `LOG_LEVEL`               | Logging level (fatal/error/warn/info/debug/trace/silent) | info                  |
 | `PROMPTS_CONFIG_FILE`     | Path to prompts configuration JSON                       | prompts.json          |
+| `INDEX_JOB_STORE_PATH`    | Durable background-job metadata JSON path                 | ~/.qdrant-mcp/jobs/index-jobs.json |
 
 #### Embedding Configuration
 
