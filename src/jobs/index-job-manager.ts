@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import logger from "../logger.js";
 
 const log = logger.child({ component: "index-job-manager" });
@@ -86,8 +85,7 @@ interface PersistedJobs {
 const TERMINAL_STATES = new Set<IndexJobState>(["completed", "failed", "cancelled", "stale"]);
 
 export function defaultIndexJobStorePath(): string {
-  return process.env.INDEX_JOB_STORE_PATH ||
-    join(homedir(), ".qdrant-mcp", "jobs", "index-jobs.json");
+  return process.env.INDEX_JOB_STORE_PATH || "/data/jobs/index-jobs.json";
 }
 
 export class IndexJobManager {

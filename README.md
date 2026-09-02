@@ -209,9 +209,10 @@ at a time. A conflicting start returns `accepted: false` with
 the same lock and return the same structured busy result instead of racing an
 active indexer.
 
-Job metadata is atomically persisted to `INDEX_JOB_STORE_PATH` (default
-`~/.qdrant-mcp/jobs/index-jobs.json`). Mount the containing directory on durable,
-writable storage in containers. On startup, persisted `queued` or `running` jobs
+Job metadata is atomically persisted to `/data/jobs/index-jobs.json`, using the
+existing writable MCP state volume. The `jobs` directory is created automatically.
+`INDEX_JOB_STORE_PATH` remains available as an optional override. On startup,
+persisted `queued` or `running` jobs
 are changed to `stale`; the server never claims that work survived a process
 restart. Reconcile the source and index status, then submit a new logical attempt
 with a new `operationId`.
@@ -610,7 +611,7 @@ See [examples/](examples/) directory for detailed guides:
 | `QDRANT_API_KEY`          | API key for Qdrant authentication                        | -                     |
 | `LOG_LEVEL`               | Logging level (fatal/error/warn/info/debug/trace/silent) | info                  |
 | `PROMPTS_CONFIG_FILE`     | Path to prompts configuration JSON                       | prompts.json          |
-| `INDEX_JOB_STORE_PATH`    | Durable background-job metadata JSON path                 | ~/.qdrant-mcp/jobs/index-jobs.json |
+| `INDEX_JOB_STORE_PATH`    | Optional durable background-job metadata JSON override    | /data/jobs/index-jobs.json |
 
 #### Embedding Configuration
 

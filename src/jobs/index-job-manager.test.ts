@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { IndexJobManager } from "./index-job-manager.js";
+import { defaultIndexJobStorePath, IndexJobManager } from "./index-job-manager.js";
 
 describe("IndexJobManager", () => {
   let directory: string;
@@ -16,6 +16,42 @@ describe("IndexJobManager", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it("defaults to the persistent MCP state volume and permits an explicit override", () => {
+    const original = process.env.INDEX_JOB_STORE_PATH;
+    try {
+      delete process.env.INDEX_JOB_STORE_PATH;
+      expect(defaultIndexJobStorePath()).toBe("/data/jobs/index-jobs.json");
+
+      process.env.INDEX_JOB_STORE_PATH = "/custom/jobs.json";
+      expect(defaultIndexJobStorePath()).toBe("/custom/jobs.json");
+    } finally {
+      if (original === undefined) delete process.env.INDEX_JOB_STORE_PATH;
+      else process.env.INDEX_JOB_STORE_PATH = original;
+    }
+  });
+
+  it("creates the jobs directory before persisting the first job", async () => {
+    const nestedStorePath = join(directory, "data", "jobs", "index-jobs.json");
+    const manager = new IndexJobManager(nestedStorePath);
+    await manager.initialize();
+
+    const submitted = await manager.submit({
+      operationId: "directory-creation",
+      operation: "index_codebase",
+      path: "/repo/a",
+      target: "code:a",
+      run: async () => ({ indexed: true }),
+    });
+    await manager.waitForTerminal(submitted.job.jobId);
+
+    expect((await fs.stat(join(directory, "data", "jobs"))).isDirectory()).toBe(true);
+    const persisted = JSON.parse(await fs.readFile(nestedStorePath, "utf-8"));
+    expect(persisted.jobs[0]).toMatchObject({
+      operationId: "directory-creation",
+      state: "completed",
+    });
   });
 
   it("returns immediately and records progress before completing", async () => {
