@@ -2,6 +2,7 @@
  * CodeIndexer - Main orchestrator for code vectorization
  */
 
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
 import picomatch from "picomatch";
@@ -150,6 +151,7 @@ export class CodeIndexer {
       });
       const metadataExtractor = new MetadataExtractor();
       const allChunks: Array<{ chunk: CodeChunk; id: string }> = [];
+      const indexedFileHashes = new Map<string, string>();
 
       for (const [index, filePath] of files.entries()) {
         try {
@@ -162,15 +164,18 @@ export class CodeIndexer {
           });
 
           const code = await fs.readFile(filePath, "utf-8");
+          const relativePath = relative(absolutePath, filePath);
 
           // Check for secrets (basic detection)
           if (metadataExtractor.containsSecrets(code)) {
             stats.errors?.push(`Skipped ${filePath}: potential secrets detected`);
+            indexedFileHashes.set(relativePath, this.hashContent(code));
             continue;
           }
 
           const language = metadataExtractor.extractLanguage(filePath);
           const chunks = await chunker.chunk(code, filePath, language);
+          indexedFileHashes.set(relativePath, this.hashContent(code));
 
           // Apply chunk limits if configured
           const chunksToAdd = this.config.maxChunksPerFile
@@ -204,7 +209,7 @@ export class CodeIndexer {
       if (allChunks.length === 0) {
         // Commit the snapshot only after all required Qdrant work has succeeded.
         const synchronizer = this.synchronizerFactory(absolutePath, collectionName);
-        await synchronizer.updateSnapshot(files);
+        await synchronizer.updateSnapshotFromHashes(indexedFileHashes);
 
         // Still store completion marker even with no chunks.
         await this.storeIndexingMarker(collectionName, true);
@@ -296,7 +301,7 @@ export class CodeIndexer {
       // The snapshot becomes authoritative only after every embedding and Qdrant
       // operation succeeds. Atomic replacement preserves the last valid snapshot.
       const synchronizer = this.synchronizerFactory(absolutePath, collectionName);
-      await synchronizer.updateSnapshot(files);
+      await synchronizer.updateSnapshotFromHashes(indexedFileHashes);
 
       // Store completion marker only after the required snapshot is durable.
       await this.storeIndexingMarker(collectionName, true);
@@ -620,6 +625,7 @@ export class CodeIndexer {
 
       const filesToIndex = [...changes.added, ...changes.modified];
       const allChunks: Array<{ chunk: CodeChunk; id: string }> = [];
+      const changedFileHashes = new Map<string, string>();
 
       for (const [index, filePath] of filesToIndex.entries()) {
         try {
@@ -636,11 +642,13 @@ export class CodeIndexer {
 
           // Check for secrets
           if (metadataExtractor.containsSecrets(code)) {
+            changedFileHashes.set(filePath, this.hashContent(code));
             continue;
           }
 
           const language = metadataExtractor.extractLanguage(absoluteFilePath);
           const chunks = await chunker.chunk(code, absoluteFilePath, language);
+          changedFileHashes.set(filePath, this.hashContent(code));
 
           for (const chunk of chunks) {
             const id = metadataExtractor.generateChunkId(chunk);
@@ -648,6 +656,7 @@ export class CodeIndexer {
           }
         } catch (error) {
           this.log.error({ filePath, err: error }, "Failed to process file during reindex");
+          throw error;
         }
       }
 
@@ -710,7 +719,7 @@ export class CodeIndexer {
       }
 
       // Update snapshot
-      await synchronizer.updateSnapshot(currentFiles);
+      await synchronizer.updateSnapshotFromChanges(changes, changedFileHashes);
 
       stats.durationMs = Date.now() - startTime;
       this.log.info(
@@ -758,5 +767,9 @@ export class CodeIndexer {
       ...(identity.branch && { branch: identity.branch }),
       ...(identity.commit && { commit: identity.commit }),
     };
+  }
+
+  private hashContent(content: string): string {
+    return createHash("sha256").update(content).digest("hex");
   }
 }

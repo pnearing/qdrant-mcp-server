@@ -179,6 +179,7 @@ describe("CodeIndexer", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     try {
       await fs.rm(tempDir, { recursive: true, force: true });
     } catch (_error) {
@@ -201,14 +202,14 @@ describe("CodeIndexer", () => {
       );
       let failSnapshotSave = true;
       let persistedSnapshots = 0;
-      const updateSnapshot = vi.fn(async () => {
+      const updateSnapshotFromHashes = vi.fn(async () => {
         if (failSnapshotSave) {
           throw new SnapshotSaveError(snapshotPath, permissionError);
         }
         persistedSnapshots++;
       });
       const synchronizerFactory = () =>
-        ({ updateSnapshot }) as unknown as FileSynchronizer;
+        ({ updateSnapshotFromHashes }) as unknown as FileSynchronizer;
       const failureIndexer = new CodeIndexer(
         qdrant as any,
         embeddings,
@@ -257,7 +258,7 @@ describe("CodeIndexer", () => {
       });
       const synchronizerFactory = () =>
         ({
-          updateSnapshot: vi.fn(async () => {
+          updateSnapshotFromHashes: vi.fn(async () => {
             events.push("snapshot");
           }),
         }) as unknown as FileSynchronizer;
@@ -282,20 +283,75 @@ describe("CodeIndexer", () => {
 
       const embeddingError = new Error("Embedding provider unavailable");
       vi.spyOn(embeddings, "embedBatch").mockRejectedValueOnce(embeddingError);
-      const updateSnapshot = vi.fn();
+      const updateSnapshotFromHashes = vi.fn();
       const failureIndexer = new CodeIndexer(qdrant as any, embeddings, config, () =>
-        ({ updateSnapshot }) as unknown as FileSynchronizer
+        ({ updateSnapshotFromHashes }) as unknown as FileSynchronizer
       );
 
       await expect(failureIndexer.indexCodebase(codebaseDir)).rejects.toMatchObject({
         message: "Failed to process batch at index 0",
         cause: embeddingError,
       });
-      expect(updateSnapshot).not.toHaveBeenCalled();
+      expect(updateSnapshotFromHashes).not.toHaveBeenCalled();
 
       const status = await failureIndexer.getIndexStatus(codebaseDir);
       expect(status.isIndexed).toBe(false);
       expect(status.status).toBe("indexing");
+    });
+
+    it("detects a file modified after its indexed points are written", async () => {
+      const originalContent =
+        "export function raceValue() { return 'content used for embeddings'; }";
+      const modifiedContent =
+        "export function raceValue() { return 'changed during embedding run'; }";
+      await createTestFile(codebaseDir, "race.ts", originalContent);
+
+      const originalAddPoints = qdrant.addPoints.bind(qdrant);
+      let modifiedAfterWrite = false;
+      vi.spyOn(qdrant, "addPoints").mockImplementation(async (collectionName, points) => {
+        await originalAddPoints(collectionName, points);
+        if (!modifiedAfterWrite && points.some((point) => point.payload?.relativePath === "race.ts")) {
+          modifiedAfterWrite = true;
+          await fs.writeFile(join(codebaseDir, "race.ts"), modifiedContent, "utf-8");
+        }
+      });
+
+      await indexer.indexCodebase(codebaseDir);
+      expect(modifiedAfterWrite).toBe(true);
+
+      const changes = await indexer.reindexChanges(codebaseDir);
+      expect(changes.filesModified).toBe(1);
+    });
+
+    it("detects a file deleted after its indexed points are written", async () => {
+      await createTestFile(
+        codebaseDir,
+        "deleted-during-index.ts",
+        "export function deletedDuringIndex() { return 'indexed before deletion'; }"
+      );
+
+      const originalAddPoints = qdrant.addPoints.bind(qdrant);
+      let deletedAfterWrite = false;
+      vi.spyOn(qdrant, "addPoints").mockImplementation(async (collectionName, points) => {
+        await originalAddPoints(collectionName, points);
+        if (
+          !deletedAfterWrite &&
+          points.some((point) => point.payload?.relativePath === "deleted-during-index.ts")
+        ) {
+          deletedAfterWrite = true;
+          await fs.unlink(join(codebaseDir, "deleted-during-index.ts"));
+        }
+      });
+
+      await indexer.indexCodebase(codebaseDir);
+      expect(deletedAfterWrite).toBe(true);
+
+      const deleteSpy = vi.spyOn(qdrant, "deletePointsByFilter");
+      const changes = await indexer.reindexChanges(codebaseDir);
+      expect(changes.filesDeleted).toBe(1);
+      expect(deleteSpy).toHaveBeenCalledWith(expect.stringContaining("code_"), {
+        must: [{ key: "relativePath", match: { value: "deleted-during-index.ts" } }],
+      });
     });
 
     it("should index a simple codebase", async () => {
@@ -909,7 +965,8 @@ function checkStatus(): boolean {
             modified: [],
             deleted: [],
           })),
-          updateSnapshot,
+          updateSnapshotFromHashes: updateSnapshot,
+          updateSnapshotFromChanges: updateSnapshot,
         }) as unknown as FileSynchronizer;
       const recoveryIndexer = new CodeIndexer(
         qdrant as any,
