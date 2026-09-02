@@ -187,10 +187,9 @@ describe("GitHistoryIndexer", () => {
     it("should fail for non-git repository", async () => {
       mockExtractorInstance.validateRepository.mockResolvedValue(false);
 
-      const stats = await indexer.indexHistory("/not/a/repo");
-
-      expect(stats.status).toBe("failed");
-      expect(stats.errors?.some((e) => e.includes("Not a valid git repository"))).toBe(true);
+      await expect(indexer.indexHistory("/not/a/repo")).rejects.toThrow(
+        "Not a valid git repository"
+      );
     });
 
     it("should handle empty repository", async () => {
@@ -615,13 +614,13 @@ describe("GitHistoryIndexer", () => {
       mockExtractorInstance.getCommitDiff.mockResolvedValue("");
       mockEmbeddings.embedBatch.mockRejectedValue(new Error("Embedding API error"));
 
-      const stats = await indexer.indexHistory("/test/repo");
-
-      expect(stats.status).toBe("partial");
-      expect(stats.errors?.some((e) => e.includes("batch"))).toBe(true);
+      await expect(indexer.indexHistory("/test/repo")).rejects.toThrow(
+        "Failed to process batch at index 0"
+      );
+      expect(mockSynchronizerInstance.updateSnapshot).not.toHaveBeenCalled();
     });
 
-    it("should handle snapshot save failure gracefully", async () => {
+    it("should reject when snapshot persistence fails", async () => {
       const mockCommits = [
         {
           hash: "abc123",
@@ -643,26 +642,44 @@ describe("GitHistoryIndexer", () => {
       mockExtractorInstance.getCommitDiff.mockResolvedValue("");
       mockSynchronizerInstance.updateSnapshot.mockRejectedValue(new Error("Snapshot write failed"));
 
-      const stats = await indexer.indexHistory("/test/repo");
-
-      expect(stats.status).toBe("completed");
-      expect(stats.errors?.some((e) => e.includes("Snapshot"))).toBe(true);
+      await expect(indexer.indexHistory("/test/repo")).rejects.toThrow("Snapshot write failed");
+      expect(mockQdrant.addPoints).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.arrayContaining([
+          expect.objectContaining({ payload: expect.objectContaining({ indexingComplete: true }) }),
+        ])
+      );
     });
 
-    it("should handle storeIndexingMarker errors silently", async () => {
-      const loggerMod = await import("../logger.js");
-      const logError = loggerMod.default.error as ReturnType<typeof vi.fn>;
-      logError.mockClear();
-
+    it("should reject when the completion marker cannot be stored", async () => {
       mockExtractorInstance.validateRepository.mockResolvedValue(true);
       mockExtractorInstance.getLatestCommitHash.mockResolvedValue("abc123");
       mockExtractorInstance.getCommits.mockResolvedValue([]);
-      mockQdrant.addPoints.mockRejectedValueOnce(new Error("Marker failed"));
+      mockQdrant.addPoints
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("Completion marker failed"));
 
-      const stats = await indexer.indexHistory("/test/repo");
+      await expect(indexer.indexHistory("/test/repo")).rejects.toThrow(
+        "Completion marker failed"
+      );
+      expect(mockSynchronizerInstance.updateSnapshot).toHaveBeenCalledWith("abc123", 0);
+    });
 
-      expect(stats.status).toBe("completed");
-      expect(logError).toHaveBeenCalled();
+    it("stores the incremental completion marker after snapshot persistence", async () => {
+      mockQdrant.collectionExists.mockResolvedValue(true);
+      mockExtractorInstance.getLatestCommitHash.mockResolvedValue("new123");
+      mockExtractorInstance.getCommits.mockResolvedValue([]);
+      mockSynchronizerInstance.initialize.mockResolvedValue(true);
+      mockSynchronizerInstance.getLastCommitHash.mockReturnValue("old123");
+
+      await indexer.indexNewCommits("/test/repo");
+
+      expect(mockQdrant.addPoints).toHaveBeenLastCalledWith(
+        expect.any(String),
+        expect.arrayContaining([
+          expect.objectContaining({ payload: expect.objectContaining({ indexingComplete: true }) }),
+        ])
+      );
     });
 
     it("should use hybrid search for indexing when enabled", async () => {
@@ -1057,11 +1074,9 @@ describe("GitHistoryIndexer", () => {
       mockQdrant.collectionExists.mockResolvedValue(false);
       mockQdrant.getCollectionInfo.mockResolvedValue({ hybridEnabled: false });
 
-      const stats = await indexer.indexHistory("/test/repo");
-
-      expect(stats.status).toBe("partial");
-      expect(stats.errors).toBeDefined();
-      expect(stats.errors?.some((e) => e.includes("after 3 attempts"))).toBe(true);
+      await expect(indexer.indexHistory("/test/repo")).rejects.toThrow(
+        "Failed to process batch at index 0 after 3 attempts"
+      );
     });
   });
 });
