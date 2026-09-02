@@ -14,6 +14,28 @@ export interface Snapshot {
   merkleTree: string; // Serialized tree
 }
 
+export class SnapshotSaveError extends Error {
+  readonly code?: string;
+
+  constructor(
+    readonly snapshotPath: string,
+    cause: unknown
+  ) {
+    const causeCode =
+      typeof cause === "object" && cause !== null && "code" in cause
+        ? (cause as NodeJS.ErrnoException).code
+        : undefined;
+    const code = causeCode === undefined ? undefined : String(causeCode);
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `Failed to persist snapshot at "${snapshotPath}"${code ? ` [${code}]` : ""}: ${detail}`,
+      { cause }
+    );
+    this.name = "SnapshotSaveError";
+    this.code = code;
+  }
+}
+
 export class SnapshotManager {
   constructor(private snapshotPath: string) {}
 
@@ -32,14 +54,21 @@ export class SnapshotManager {
       merkleTree: tree.serialize(),
     };
 
-    // Ensure directory exists
-    await fs.mkdir(dirname(this.snapshotPath), { recursive: true });
-
-    // Write snapshot atomically (write to temp file, then rename)
-    // Use unique temp file name to avoid race conditions
     const tempPath = `${this.snapshotPath}.tmp.${Date.now()}.${Math.random().toString(36).substring(2, 9)}`;
-    await fs.writeFile(tempPath, JSON.stringify(snapshot, null, 2), "utf-8");
-    await fs.rename(tempPath, this.snapshotPath);
+
+    try {
+      // Ensure directory exists
+      await fs.mkdir(dirname(this.snapshotPath), { recursive: true });
+
+      // Write snapshot atomically (write to temp file, then rename).
+      // A failed write or rename leaves the last valid snapshot authoritative.
+      await fs.writeFile(tempPath, JSON.stringify(snapshot, null, 2), "utf-8");
+      await fs.rename(tempPath, this.snapshotPath);
+    } catch (error) {
+      // Best-effort cleanup must never hide the persistence failure.
+      await fs.unlink(tempPath).catch(() => undefined);
+      throw new SnapshotSaveError(this.snapshotPath, error);
+    }
   }
 
   /**
