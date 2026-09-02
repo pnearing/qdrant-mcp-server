@@ -134,6 +134,54 @@ describe("IndexJobManager", () => {
     await manager.waitForTerminal(first.job.jobId);
   });
 
+  it("joins only active legacy requests with the same request fingerprint", async () => {
+    const manager = new IndexJobManager(storePath);
+    await manager.initialize();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const run = vi.fn(async () => blocked);
+
+    const first = await manager.submit({
+      operationId: "first",
+      operation: "index_git_history",
+      path: "/repo/a",
+      target: "git:a",
+      requestFingerprint: "maxCommits=25",
+      joinActiveOperation: true,
+      run,
+    });
+    const matching = await manager.submit({
+      operationId: "matching",
+      operation: "index_git_history",
+      path: "/repo/a",
+      target: "git:a",
+      requestFingerprint: "maxCommits=25",
+      joinActiveOperation: true,
+      run,
+    });
+    const different = await manager.submit({
+      operationId: "different",
+      operation: "index_git_history",
+      path: "/repo/a",
+      target: "git:a",
+      requestFingerprint: "maxCommits=50",
+      joinActiveOperation: true,
+      run,
+    });
+
+    expect(matching).toMatchObject({
+      accepted: true,
+      deduplicated: true,
+      job: { jobId: first.job.jobId },
+    });
+    expect(different).toMatchObject({ accepted: false, reason: "target_busy" });
+    expect(run).toHaveBeenCalledTimes(1);
+    release();
+    await manager.waitForTerminal(first.job.jobId);
+  });
+
   it("runs different targets independently", async () => {
     const manager = new IndexJobManager(storePath);
     await manager.initialize();

@@ -47,6 +47,7 @@ export interface IndexJobRecord {
   operation: IndexJobOperation;
   path: string;
   target: string;
+  requestFingerprint?: string;
   sourceRevision?: string;
   state: IndexJobState;
   createdAt: string;
@@ -63,6 +64,7 @@ export interface SubmitIndexJobRequest {
   operation: IndexJobOperation;
   path: string;
   target: string;
+  requestFingerprint?: string;
   sourceRevision?: string;
   run: (updateProgress: (progress: IndexJobProgress) => void) => Promise<unknown>;
   joinActiveOperation?: boolean;
@@ -147,7 +149,12 @@ export class IndexJobManager {
       const activeId = this.activeJobsByTarget.get(request.target);
       if (activeId) {
         const activeJob = this.jobs.get(activeId)!;
-        if (request.joinActiveOperation && activeJob.operation === request.operation) {
+        if (
+          request.joinActiveOperation &&
+          activeJob.operation === request.operation &&
+          request.requestFingerprint !== undefined &&
+          activeJob.requestFingerprint === request.requestFingerprint
+        ) {
           return { accepted: true as const, deduplicated: true, job: this.clone(activeJob) };
         }
         return {
@@ -165,6 +172,7 @@ export class IndexJobManager {
         operation: request.operation,
         path: request.path,
         target: request.target,
+        ...(request.requestFingerprint && { requestFingerprint: request.requestFingerprint }),
         ...(request.sourceRevision && { sourceRevision: request.sourceRevision }),
         state: "queued",
         createdAt,

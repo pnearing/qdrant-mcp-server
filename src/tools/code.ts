@@ -7,7 +7,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CodeIndexer } from "../code/indexer.js";
 import type { CodeSearchResult } from "../code/types.js";
 import type { IndexJobManager } from "../jobs/index-job-manager.js";
-import { publicJob, runBlockingJob, startJobResult } from "../jobs/tool-contract.js";
+import {
+  indexJobRequestFingerprint,
+  publicJob,
+  runBlockingJob,
+  startJobResult,
+} from "../jobs/tool-contract.js";
 import logger from "../logger.js";
 import { withToolLogging } from "./logging.js";
 import * as schemas from "./schemas.js";
@@ -58,6 +63,11 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
           operation: "index_codebase",
           path,
           target,
+          requestFingerprint: indexJobRequestFingerprint("index_codebase", {
+            forceReindex,
+            extensions,
+            ignorePatterns,
+          }),
           run: (updateProgress) =>
             codeIndexer.indexCodebase(
               path,
@@ -187,6 +197,7 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
         operation: "reindex_changes",
         path,
         target,
+        requestFingerprint: indexJobRequestFingerprint("reindex_changes"),
         run: (updateProgress) =>
           codeIndexer.reindexChanges(path, (progress) => {
             updateProgress(progress);
@@ -329,6 +340,7 @@ export function registerCodeTools(server: McpServer, deps: CodeToolDependencies)
         operation: "clear_index",
         path,
         target,
+        requestFingerprint: indexJobRequestFingerprint("clear_index"),
         run: () => codeIndexer.clearIndex(path),
       });
       if (!("state" in terminal)) return terminal;

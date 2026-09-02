@@ -24,8 +24,20 @@ export interface PublicIndexJobRecord {
 }
 
 export function publicJob(job: IndexJobRecord): PublicIndexJobRecord {
-  const { target: _target, ...record } = job;
+  const { target: _target, requestFingerprint: _requestFingerprint, ...record } = job;
   return record;
+}
+
+export function indexJobRequestFingerprint(
+  operation: string,
+  options: Record<string, unknown> = {}
+): string {
+  const normalized = Object.fromEntries(
+    Object.entries(options)
+      .filter(([, value]) => value !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
+  return JSON.stringify({ operation, options: normalized });
 }
 
 export function startJobResult(result: SubmitIndexJobResult): CallToolResult {
@@ -64,7 +76,7 @@ export function statusJobResult(job: IndexJobRecord): CallToolResult {
 
 export async function runBlockingJob(
   manager: IndexJobManager,
-  request: SubmitIndexJobRequest
+  request: SubmitIndexJobRequest & { requestFingerprint: string }
 ): Promise<IndexJobRecord | CallToolResult> {
   const submitted = await manager.submit({ ...request, joinActiveOperation: true });
   if (!submitted.accepted) return startJobResult(submitted);

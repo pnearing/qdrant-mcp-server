@@ -255,6 +255,42 @@ describe("durable index-job MCP tools", () => {
     expect(codeIndexer.indexCodebase).toHaveBeenCalledTimes(1);
   });
 
+  it("returns target_busy when legacy Git indexing options differ", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    gitHistoryIndexer.indexHistory.mockImplementation(async () => {
+      await blocked;
+      return {
+        commitsScanned: 1,
+        commitsIndexed: 1,
+        chunksCreated: 1,
+        durationMs: 1,
+        status: "completed",
+      };
+    });
+
+    const first = client.callTool({
+      name: "index_git_history",
+      arguments: { path: "/repo/a", maxCommits: 25 },
+    });
+    await vi.waitFor(() => expect(gitHistoryIndexer.indexHistory).toHaveBeenCalledTimes(1));
+    const different = await client.callTool({
+      name: "index_git_history",
+      arguments: { path: "/repo/a", maxCommits: 50 },
+    });
+
+    expect(different.structuredContent).toMatchObject({
+      accepted: false,
+      deduplicated: false,
+      reason: "target_busy",
+    });
+    expect(gitHistoryIndexer.indexHistory).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+  });
+
   it("registers both asynchronous Git-history operations", async () => {
     const full = await client.callTool({
       name: "start_index_git_history",

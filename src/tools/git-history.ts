@@ -6,7 +6,12 @@ import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { GitHistoryIndexer } from "../git/indexer.js";
 import type { IndexJobManager } from "../jobs/index-job-manager.js";
-import { publicJob, runBlockingJob, startJobResult } from "../jobs/tool-contract.js";
+import {
+  indexJobRequestFingerprint,
+  publicJob,
+  runBlockingJob,
+  startJobResult,
+} from "../jobs/tool-contract.js";
 import logger from "../logger.js";
 import { withToolLogging } from "./logging.js";
 import * as schemas from "./schemas.js";
@@ -42,6 +47,11 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
           operation: "index_git_history",
           path,
           target,
+          requestFingerprint: indexJobRequestFingerprint("index_git_history", {
+            forceReindex,
+            sinceDate,
+            maxCommits,
+          }),
           run: (updateProgress) =>
             gitHistoryIndexer.indexHistory(
               path,
@@ -191,6 +201,7 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
         operation: "index_new_commits",
         path,
         target,
+        requestFingerprint: indexJobRequestFingerprint("index_new_commits"),
         run: (updateProgress) =>
           gitHistoryIndexer.indexNewCommits(path, (progress) => {
             updateProgress(progress);
@@ -345,6 +356,7 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
         operation: "clear_git_index",
         path,
         target,
+        requestFingerprint: indexJobRequestFingerprint("clear_git_index"),
         run: () => gitHistoryIndexer.clearIndex(path),
       });
       if (!("state" in terminal)) return terminal;
