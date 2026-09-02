@@ -23,7 +23,7 @@ services:
     user: "${CONTAINER_UID}:${CONTAINER_GID}"
 
     volumes:
-      - "${SOURCES_PATH}:/sources:rw"
+      - "${SOURCES_PATH:?SOURCES_PATH is required}:/sources:rw"
       - "${MCP_STATE_PATH:?MCP_STATE_PATH is required}:/data:rw"
 
     ports:
@@ -35,4 +35,4 @@ services:
 networks:
   rag:
     external: true
-    name: rag
+    name: "${RAG_NETWORK_NAME:-rag}"
