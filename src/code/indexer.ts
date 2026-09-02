@@ -2,6 +2,7 @@
  * CodeIndexer - Main orchestrator for code vectorization
  */
 
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
 import picomatch from "picomatch";
@@ -39,7 +40,12 @@ export class CodeIndexer {
   constructor(
     private qdrant: QdrantManager,
     private embeddings: EmbeddingProvider,
-    private config: CodeConfig
+    private config: CodeConfig,
+    private synchronizerFactory: (
+      codebasePath: string,
+      collectionName: string
+    ) => FileSynchronizer = (codebasePath, collectionName) =>
+      new FileSynchronizer(codebasePath, collectionName)
   ) {}
 
   /**
@@ -145,6 +151,7 @@ export class CodeIndexer {
       });
       const metadataExtractor = new MetadataExtractor();
       const allChunks: Array<{ chunk: CodeChunk; id: string }> = [];
+      const indexedFileHashes = new Map<string, string>();
 
       for (const [index, filePath] of files.entries()) {
         try {
@@ -157,15 +164,26 @@ export class CodeIndexer {
           });
 
           const code = await fs.readFile(filePath, "utf-8");
+          const relativePath = relative(absolutePath, filePath);
 
           // Check for secrets (basic detection)
           if (metadataExtractor.containsSecrets(code)) {
             stats.errors?.push(`Skipped ${filePath}: potential secrets detected`);
+            indexedFileHashes.set(relativePath, this.hashContent(code));
+            continue;
+          }
+
+          // Keep intentionally skipped files in the snapshot after the total
+          // chunk budget is exhausted. Otherwise the next incremental run
+          // would misclassify them as newly added and bypass the initial cap.
+          if (this.config.maxTotalChunks && allChunks.length >= this.config.maxTotalChunks) {
+            indexedFileHashes.set(relativePath, this.hashContent(code));
             continue;
           }
 
           const language = metadataExtractor.extractLanguage(filePath);
           const chunks = await chunker.chunk(code, filePath, language);
+          indexedFileHashes.set(relativePath, this.hashContent(code));
 
           // Apply chunk limits if configured
           const chunksToAdd = this.config.maxChunksPerFile
@@ -183,11 +201,6 @@ export class CodeIndexer {
           }
 
           stats.filesIndexed++;
-
-          // Check total chunk limit
-          if (this.config.maxTotalChunks && allChunks.length >= this.config.maxTotalChunks) {
-            break;
-          }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           stats.errors?.push(`Failed to process ${filePath}: ${errorMessage}`);
@@ -196,19 +209,12 @@ export class CodeIndexer {
 
       stats.chunksCreated = allChunks.length;
 
-      // Save snapshot for incremental updates (even if no chunks were created)
-      try {
-        const synchronizer = new FileSynchronizer(absolutePath, collectionName);
-        await synchronizer.updateSnapshot(files);
-      } catch (error) {
-        // Snapshot failure shouldn't fail the entire indexing
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        this.log.error({ err: error }, "Failed to save snapshot");
-        stats.errors?.push(`Snapshot save failed: ${errorMessage}`);
-      }
-
       if (allChunks.length === 0) {
-        // Still store completion marker even with no chunks
+        // Commit the snapshot only after all required Qdrant work has succeeded.
+        const synchronizer = this.synchronizerFactory(absolutePath, collectionName);
+        await synchronizer.updateSnapshotFromHashes(indexedFileHashes);
+
+        // Still store completion marker even with no chunks.
         await this.storeIndexingMarker(collectionName, true);
         stats.status = "completed";
         stats.durationMs = Date.now() - startTime;
@@ -291,13 +297,16 @@ export class CodeIndexer {
             await this.qdrant.addPoints(collectionName, points);
           }
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          stats.errors?.push(`Failed to process batch at index ${i}: ${errorMessage}`);
-          stats.status = "partial";
+          throw new Error(`Failed to process batch at index ${i}`, { cause: error });
         }
       }
 
-      // Store completion marker to indicate indexing is complete
+      // The snapshot becomes authoritative only after every embedding and Qdrant
+      // operation succeeds. Atomic replacement preserves the last valid snapshot.
+      const synchronizer = this.synchronizerFactory(absolutePath, collectionName);
+      await synchronizer.updateSnapshotFromHashes(indexedFileHashes);
+
+      // Store completion marker only after the required snapshot is durable.
       await this.storeIndexingMarker(collectionName, true);
 
       stats.durationMs = Date.now() - startTime;
@@ -311,11 +320,11 @@ export class CodeIndexer {
       );
       return stats;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      stats.status = "failed";
-      stats.errors?.push(`Indexing failed: ${errorMessage}`);
-      stats.durationMs = Date.now() - startTime;
-      return stats;
+      this.log.error(
+        { err: error, path: absolutePath, collectionName, durationMs: Date.now() - startTime },
+        "Indexing failed"
+      );
+      throw error;
     }
   }
 
@@ -324,43 +333,38 @@ export class CodeIndexer {
    * Called at the start of indexing with complete=false, and at the end with complete=true.
    */
   private async storeIndexingMarker(collectionName: string, complete: boolean): Promise<void> {
-    try {
-      // Create a dummy vector of zeros (required by Qdrant)
-      const vectorSize = this.embeddings.getDimensions();
-      const zeroVector = new Array(vectorSize).fill(0);
+    // Create a dummy vector of zeros (required by Qdrant)
+    const vectorSize = this.embeddings.getDimensions();
+    const zeroVector = new Array(vectorSize).fill(0);
 
-      // Check if collection uses hybrid mode
-      const collectionInfo = await this.qdrant.getCollectionInfo(collectionName);
+    // Check if collection uses hybrid mode
+    const collectionInfo = await this.qdrant.getCollectionInfo(collectionName);
 
-      const payload = {
-        _type: "indexing_metadata",
-        indexingComplete: complete,
-        ...(complete
-          ? { completedAt: new Date().toISOString() }
-          : { startedAt: new Date().toISOString() }),
-      };
+    const payload = {
+      _type: "indexing_metadata",
+      indexingComplete: complete,
+      ...(complete
+        ? { completedAt: new Date().toISOString() }
+        : { startedAt: new Date().toISOString() }),
+    };
 
-      if (collectionInfo.hybridEnabled) {
-        await this.qdrant.addPointsWithSparse(collectionName, [
-          {
-            id: INDEXING_METADATA_ID,
-            vector: zeroVector,
-            sparseVector: { indices: [], values: [] },
-            payload,
-          },
-        ]);
-      } else {
-        await this.qdrant.addPoints(collectionName, [
-          {
-            id: INDEXING_METADATA_ID,
-            vector: zeroVector,
-            payload,
-          },
-        ]);
-      }
-    } catch (error) {
-      // Non-fatal: log but don't fail the indexing
-      this.log.error({ err: error }, "Failed to store indexing marker");
+    if (collectionInfo.hybridEnabled) {
+      await this.qdrant.addPointsWithSparse(collectionName, [
+        {
+          id: INDEXING_METADATA_ID,
+          vector: zeroVector,
+          sparseVector: { indices: [], values: [] },
+          payload,
+        },
+      ]);
+    } else {
+      await this.qdrant.addPoints(collectionName, [
+        {
+          id: INDEXING_METADATA_ID,
+          vector: zeroVector,
+          payload,
+        },
+      ]);
     }
   }
 
@@ -554,7 +558,7 @@ export class CodeIndexer {
       }
 
       // Initialize synchronizer
-      const synchronizer = new FileSynchronizer(absolutePath, collectionName);
+      const synchronizer = this.synchronizerFactory(absolutePath, collectionName);
       const hasSnapshot = await synchronizer.initialize();
 
       if (!hasSnapshot) {
@@ -616,14 +620,15 @@ export class CodeIndexer {
             };
             await this.qdrant.deletePointsByFilter(collectionName, filter);
           } catch (error) {
-            // Log but don't fail - file might not have any chunks
             this.log.error({ relativePath, err: error }, "Failed to delete chunks during reindex");
+            throw error;
           }
         }
       }
 
       const filesToIndex = [...changes.added, ...changes.modified];
       const allChunks: Array<{ chunk: CodeChunk; id: string }> = [];
+      const changedFileHashes = new Map<string, string>();
 
       for (const [index, filePath] of filesToIndex.entries()) {
         try {
@@ -640,11 +645,13 @@ export class CodeIndexer {
 
           // Check for secrets
           if (metadataExtractor.containsSecrets(code)) {
+            changedFileHashes.set(filePath, this.hashContent(code));
             continue;
           }
 
           const language = metadataExtractor.extractLanguage(absoluteFilePath);
           const chunks = await chunker.chunk(code, absoluteFilePath, language);
+          changedFileHashes.set(filePath, this.hashContent(code));
 
           for (const chunk of chunks) {
             const id = metadataExtractor.generateChunkId(chunk);
@@ -652,6 +659,7 @@ export class CodeIndexer {
           }
         } catch (error) {
           this.log.error({ filePath, err: error }, "Failed to process file during reindex");
+          throw error;
         }
       }
 
@@ -714,7 +722,7 @@ export class CodeIndexer {
       }
 
       // Update snapshot
-      await synchronizer.updateSnapshot(currentFiles);
+      await synchronizer.updateSnapshotFromChanges(changes, changedFileHashes);
 
       stats.durationMs = Date.now() - startTime;
       this.log.info(
@@ -730,7 +738,7 @@ export class CodeIndexer {
       return stats;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new Error(`Incremental re-indexing failed: ${errorMessage}`);
+      throw new Error(`Incremental re-indexing failed: ${errorMessage}`, { cause: error });
     }
   }
 
@@ -749,7 +757,7 @@ export class CodeIndexer {
 
     // Also delete snapshot
     try {
-      const synchronizer = new FileSynchronizer(absolutePath, collectionName);
+      const synchronizer = this.synchronizerFactory(absolutePath, collectionName);
       await synchronizer.deleteSnapshot();
     } catch (_error) {
       // Ignore snapshot deletion errors
@@ -762,5 +770,9 @@ export class CodeIndexer {
       ...(identity.branch && { branch: identity.branch }),
       ...(identity.commit && { commit: identity.commit }),
     };
+  }
+
+  private hashContent(content: string): string {
+    return createHash("sha256").update(content).digest("hex");
   }
 }

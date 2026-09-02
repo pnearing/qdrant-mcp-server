@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodeIndexer } from "../../src/code/indexer.js";
+import type { FileSynchronizer } from "../../src/code/sync/synchronizer.js";
+import { SnapshotSaveError } from "../../src/code/sync/snapshot.js";
 import type { CodeConfig } from "../../src/code/types.js";
 import type { EmbeddingProvider } from "../../src/embeddings/base.js";
 import type { QdrantManager } from "../../src/qdrant/client.js";
@@ -177,6 +179,7 @@ describe("CodeIndexer", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     try {
       await fs.rm(tempDir, { recursive: true, force: true });
     } catch (_error) {
@@ -185,6 +188,172 @@ describe("CodeIndexer", () => {
   });
 
   describe("indexCodebase", () => {
+    it("rejects a snapshot persistence failure and remains retryable", async () => {
+      await createTestFile(
+        codebaseDir,
+        "snapshot.ts",
+        "export function snapshotTest() { return 'snapshot persistence'; }"
+      );
+
+      const snapshotPath = "/data/.qdrant-mcp/snapshots/code_test.json";
+      const permissionError = Object.assign(
+        new Error("EACCES: permission denied, mkdir '/data/.qdrant-mcp'"),
+        { code: "EACCES", path: snapshotPath }
+      );
+      let failSnapshotSave = true;
+      let persistedSnapshots = 0;
+      const updateSnapshotFromHashes = vi.fn(async () => {
+        if (failSnapshotSave) {
+          throw new SnapshotSaveError(snapshotPath, permissionError);
+        }
+        persistedSnapshots++;
+      });
+      const synchronizerFactory = () =>
+        ({ updateSnapshotFromHashes }) as unknown as FileSynchronizer;
+      const failureIndexer = new CodeIndexer(
+        qdrant as any,
+        embeddings,
+        config,
+        synchronizerFactory
+      );
+      const infoSpy = vi.spyOn((failureIndexer as any).log, "info");
+
+      await expect(failureIndexer.indexCodebase(codebaseDir)).rejects.toMatchObject({
+        name: "SnapshotSaveError",
+        code: "EACCES",
+        snapshotPath,
+        cause: permissionError,
+      });
+      expect(persistedSnapshots).toBe(0);
+      expect(infoSpy).not.toHaveBeenCalledWith(expect.anything(), "Indexing complete");
+
+      const failedStatus = await failureIndexer.getIndexStatus(codebaseDir);
+      expect(failedStatus.isIndexed).toBe(false);
+      expect(failedStatus.status).toBe("indexing");
+
+      failSnapshotSave = false;
+      await expect(failureIndexer.indexCodebase(codebaseDir)).resolves.toMatchObject({
+        status: "completed",
+      });
+      expect(persistedSnapshots).toBe(1);
+
+      const recoveredStatus = await failureIndexer.getIndexStatus(codebaseDir);
+      expect(recoveredStatus.isIndexed).toBe(true);
+      expect(recoveredStatus.status).toBe("indexed");
+    });
+
+    it("commits the snapshot after content writes and before the completion marker", async () => {
+      await createTestFile(
+        codebaseDir,
+        "ordering.ts",
+        "export function orderingTest() { return 'qdrant before snapshot'; }"
+      );
+
+      const events: string[] = [];
+      const originalAddPoints = qdrant.addPoints.bind(qdrant);
+      vi.spyOn(qdrant, "addPoints").mockImplementation(async (collectionName, points) => {
+        const marker = points[0]?.payload?._type === "indexing_metadata";
+        events.push(marker ? `marker:${String(points[0].payload.indexingComplete)}` : "content");
+        await originalAddPoints(collectionName, points);
+      });
+      const synchronizerFactory = () =>
+        ({
+          updateSnapshotFromHashes: vi.fn(async () => {
+            events.push("snapshot");
+          }),
+        }) as unknown as FileSynchronizer;
+      const orderingIndexer = new CodeIndexer(
+        qdrant as any,
+        embeddings,
+        config,
+        synchronizerFactory
+      );
+
+      await orderingIndexer.indexCodebase(codebaseDir);
+
+      expect(events).toEqual(["marker:false", "content", "snapshot", "marker:true"]);
+    });
+
+    it("does not commit a snapshot when embedding fails", async () => {
+      await createTestFile(
+        codebaseDir,
+        "embedding.ts",
+        "export function embeddingFailure() { return 'do not snapshot'; }"
+      );
+
+      const embeddingError = new Error("Embedding provider unavailable");
+      vi.spyOn(embeddings, "embedBatch").mockRejectedValueOnce(embeddingError);
+      const updateSnapshotFromHashes = vi.fn();
+      const failureIndexer = new CodeIndexer(qdrant as any, embeddings, config, () =>
+        ({ updateSnapshotFromHashes }) as unknown as FileSynchronizer
+      );
+
+      await expect(failureIndexer.indexCodebase(codebaseDir)).rejects.toMatchObject({
+        message: "Failed to process batch at index 0",
+        cause: embeddingError,
+      });
+      expect(updateSnapshotFromHashes).not.toHaveBeenCalled();
+
+      const status = await failureIndexer.getIndexStatus(codebaseDir);
+      expect(status.isIndexed).toBe(false);
+      expect(status.status).toBe("indexing");
+    });
+
+    it("detects a file modified after its indexed points are written", async () => {
+      const originalContent =
+        "export function raceValue() { return 'content used for embeddings'; }";
+      const modifiedContent =
+        "export function raceValue() { return 'changed during embedding run'; }";
+      await createTestFile(codebaseDir, "race.ts", originalContent);
+
+      const originalAddPoints = qdrant.addPoints.bind(qdrant);
+      let modifiedAfterWrite = false;
+      vi.spyOn(qdrant, "addPoints").mockImplementation(async (collectionName, points) => {
+        await originalAddPoints(collectionName, points);
+        if (!modifiedAfterWrite && points.some((point) => point.payload?.relativePath === "race.ts")) {
+          modifiedAfterWrite = true;
+          await fs.writeFile(join(codebaseDir, "race.ts"), modifiedContent, "utf-8");
+        }
+      });
+
+      await indexer.indexCodebase(codebaseDir);
+      expect(modifiedAfterWrite).toBe(true);
+
+      const changes = await indexer.reindexChanges(codebaseDir);
+      expect(changes.filesModified).toBe(1);
+    });
+
+    it("detects a file deleted after its indexed points are written", async () => {
+      await createTestFile(
+        codebaseDir,
+        "deleted-during-index.ts",
+        "export function deletedDuringIndex() { return 'indexed before deletion'; }"
+      );
+
+      const originalAddPoints = qdrant.addPoints.bind(qdrant);
+      let deletedAfterWrite = false;
+      vi.spyOn(qdrant, "addPoints").mockImplementation(async (collectionName, points) => {
+        await originalAddPoints(collectionName, points);
+        if (
+          !deletedAfterWrite &&
+          points.some((point) => point.payload?.relativePath === "deleted-during-index.ts")
+        ) {
+          deletedAfterWrite = true;
+          await fs.unlink(join(codebaseDir, "deleted-during-index.ts"));
+        }
+      });
+
+      await indexer.indexCodebase(codebaseDir);
+      expect(deletedAfterWrite).toBe(true);
+
+      const deleteSpy = vi.spyOn(qdrant, "deletePointsByFilter");
+      const changes = await indexer.reindexChanges(codebaseDir);
+      expect(changes.filesDeleted).toBe(1);
+      expect(deleteSpy).toHaveBeenCalledWith(expect.stringContaining("code_"), {
+        must: [{ key: "relativePath", match: { value: "deleted-during-index.ts" } }],
+      });
+    });
+
     it("should index a simple codebase", async () => {
       await createTestFile(
         codebaseDir,
@@ -767,6 +936,76 @@ function checkStatus(): boolean {
   });
 
   describe("reindexChanges", () => {
+    it("preserves the last valid snapshot when persistence fails and converges on retry", async () => {
+      await createTestFile(
+        codebaseDir,
+        "existing.ts",
+        "export const existingSnapshotValue = 'valid snapshot';"
+      );
+
+      const snapshotPath = "/data/.qdrant-mcp/snapshots/code_test.json";
+      const permissionError = Object.assign(
+        new Error("EACCES: permission denied, rename snapshot"),
+        { code: "EACCES", path: snapshotPath }
+      );
+      let snapshotVersion = 0;
+      let failSnapshotSave = false;
+      let incremental = false;
+      const updateSnapshot = vi.fn(async () => {
+        if (failSnapshotSave) {
+          throw new SnapshotSaveError(snapshotPath, permissionError);
+        }
+        snapshotVersion++;
+      });
+      const synchronizerFactory = () =>
+        ({
+          initialize: vi.fn(async () => snapshotVersion > 0),
+          detectChanges: vi.fn(async () => ({
+            added: incremental ? ["added.ts"] : [],
+            modified: [],
+            deleted: [],
+          })),
+          updateSnapshotFromHashes: updateSnapshot,
+          updateSnapshotFromChanges: updateSnapshot,
+        }) as unknown as FileSynchronizer;
+      const recoveryIndexer = new CodeIndexer(
+        qdrant as any,
+        embeddings,
+        config,
+        synchronizerFactory
+      );
+      const infoSpy = vi.spyOn((recoveryIndexer as any).log, "info");
+
+      await recoveryIndexer.indexCodebase(codebaseDir);
+      expect(snapshotVersion).toBe(1);
+
+      await createTestFile(
+        codebaseDir,
+        "added.ts",
+        "export const addedAfterSnapshot = 'incremental update';"
+      );
+      incremental = true;
+      failSnapshotSave = true;
+
+      await expect(recoveryIndexer.reindexChanges(codebaseDir)).rejects.toMatchObject({
+        message: expect.stringContaining("EACCES"),
+        cause: expect.objectContaining({
+          name: "SnapshotSaveError",
+          code: "EACCES",
+          snapshotPath,
+          cause: permissionError,
+        }),
+      });
+      expect(snapshotVersion).toBe(1);
+      expect(infoSpy).not.toHaveBeenCalledWith(expect.anything(), "Reindex complete");
+
+      failSnapshotSave = false;
+      await expect(recoveryIndexer.reindexChanges(codebaseDir)).resolves.toMatchObject({
+        filesAdded: 1,
+      });
+      expect(snapshotVersion).toBe(2);
+    });
+
     it("should throw error if not previously indexed", async () => {
       await expect(indexer.reindexChanges(codebaseDir)).rejects.toThrow("not indexed");
     });
@@ -957,7 +1196,7 @@ function helper(param: string): boolean {
       });
     });
 
-    it("should handle deletion errors gracefully", async () => {
+    it("should reject deletion errors instead of committing a new snapshot", async () => {
       await createTestFile(
         codebaseDir,
         "test.ts",
@@ -976,11 +1215,9 @@ function helper(param: string): boolean {
         "export const modified = 2;\nconsole.log('Modified');"
       );
 
-      // Should not throw, should continue with reindexing
-      const stats = await indexer.reindexChanges(codebaseDir);
+      await expect(indexer.reindexChanges(codebaseDir)).rejects.toThrow("Deletion failed");
 
       expect(deletePointsByFilterSpy).toHaveBeenCalled();
-      expect(stats.filesModified).toBe(1);
     });
   });
 
@@ -1153,6 +1390,37 @@ function helper(param: string): boolean {
       // Should stop after reaching max total chunks
       expect(stats.chunksCreated).toBeLessThanOrEqual(3);
       expect(stats.filesIndexed).toBeGreaterThan(0);
+    });
+
+    it("should snapshot files skipped by maxTotalChunks", async () => {
+      const limitedConfig = {
+        ...config,
+        maxTotalChunks: 1,
+      };
+      const limitedIndexer = new CodeIndexer(qdrant as any, embeddings, limitedConfig);
+      const embedBatchSpy = vi.spyOn(embeddings, "embedBatch");
+
+      for (let i = 0; i < 4; i++) {
+        await createTestFile(
+          codebaseDir,
+          `capped${i}.ts`,
+          `export function capped${i}() { console.log('capped ${i}'); return ${i}; }`
+        );
+      }
+
+      const initialStats = await limitedIndexer.indexCodebase(codebaseDir);
+      expect(initialStats.chunksCreated).toBe(1);
+      const embeddingCallsAfterInitialIndex = embedBatchSpy.mock.calls.length;
+
+      const incrementalStats = await limitedIndexer.reindexChanges(codebaseDir);
+
+      expect(incrementalStats).toMatchObject({
+        filesAdded: 0,
+        filesModified: 0,
+        filesDeleted: 0,
+        chunksAdded: 0,
+      });
+      expect(embedBatchSpy).toHaveBeenCalledTimes(embeddingCallsAfterInitialIndex);
     });
 
     it("should handle maxTotalChunks during chunk iteration", async () => {

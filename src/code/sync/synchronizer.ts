@@ -96,14 +96,51 @@ export class FileSynchronizer {
    */
   async updateSnapshot(files: string[]): Promise<void> {
     const fileHashes = await this.computeFileHashes(files);
-    const tree = new MerkleTree();
-    tree.build(fileHashes);
+    await this.updateSnapshotFromHashes(fileHashes);
+  }
 
-    await this.snapshotManager.save(this.codebasePath, fileHashes, tree);
+  /**
+   * Persist hashes captured from the exact contents used for indexing.
+   * This deliberately does not re-read the filesystem.
+   */
+  async updateSnapshotFromHashes(fileHashes: Map<string, string>): Promise<void> {
+    const committedHashes = new Map(fileHashes);
+    const tree = new MerkleTree();
+    tree.build(committedHashes);
+
+    await this.snapshotManager.save(this.codebasePath, committedHashes, tree);
 
     // Update internal state
-    this.previousHashes = fileHashes;
+    this.previousHashes = committedHashes;
     this.previousTree = tree;
+  }
+
+  /**
+   * Merge successfully indexed changes into the last valid snapshot.
+   * Added and modified paths must carry hashes captured while chunking.
+   */
+  async updateSnapshotFromChanges(
+    changes: FileChanges,
+    changedFileHashes: Map<string, string>
+  ): Promise<void> {
+    const requiredHashes = [...changes.added, ...changes.modified];
+    const missingHashes = requiredHashes.filter((path) => !changedFileHashes.has(path));
+
+    if (missingHashes.length > 0) {
+      throw new Error(
+        `Cannot commit snapshot without indexed content hashes for: ${missingHashes.join(", ")}`
+      );
+    }
+
+    const nextHashes = new Map(this.previousHashes);
+    for (const path of changes.deleted) {
+      nextHashes.delete(path);
+    }
+    for (const path of requiredHashes) {
+      nextHashes.set(path, changedFileHashes.get(path)!);
+    }
+
+    await this.updateSnapshotFromHashes(nextHashes);
   }
 
   /**
