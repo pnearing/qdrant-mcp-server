@@ -758,6 +758,12 @@ export class CodeIndexer {
     }
   }
 
+  async getIndexTarget(path: string): Promise<string> {
+    const absolutePath = await this.validatePath(path);
+    const collectionName = getCodeCollectionName(await resolveCodebaseIdentity(absolutePath));
+    return `code:${collectionName}`;
+  }
+
   private gitPayload(identity: CodebaseIdentity): Record<string, string> {
     return {
       ...(identity.repositoryRemote && { repositoryRemote: identity.repositoryRemote }),

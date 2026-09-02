@@ -615,6 +615,11 @@ export class GitHistoryIndexer {
     }
   }
 
+  async getIndexTarget(path: string): Promise<string> {
+    const absolutePath = await this.validatePath(path);
+    return `git:${await this.getCollectionName(absolutePath)}`;
+  }
+
   /**
    * Store indexing status marker in the collection
    */

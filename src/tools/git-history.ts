@@ -2,8 +2,11 @@
  * Git history indexing tools registration
  */
 
+import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { GitHistoryIndexer } from "../git/indexer.js";
+import type { IndexJobManager } from "../jobs/index-job-manager.js";
+import { publicJob, runBlockingJob, startJobResult } from "../jobs/tool-contract.js";
 import logger from "../logger.js";
 import { withToolLogging } from "./logging.js";
 import * as schemas from "./schemas.js";
@@ -12,10 +15,11 @@ const log = logger.child({ component: "tools" });
 
 export interface GitHistoryToolDependencies {
   gitHistoryIndexer: GitHistoryIndexer;
+  jobManager: IndexJobManager;
 }
 
 export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolDependencies): void {
-  const { gitHistoryIndexer } = deps;
+  const { gitHistoryIndexer, jobManager } = deps;
 
   // index_git_history
   server.registerTool(
@@ -32,24 +36,42 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
         log.info({ tool: "index_git_history", path, forceReindex }, "Tool called");
         const progressToken = extra._meta?.progressToken;
 
-        const stats = await gitHistoryIndexer.indexHistory(
+        const target = await gitHistoryIndexer.getIndexTarget(path);
+        const terminal = await runBlockingJob(jobManager, {
+          operationId: `legacy:index_git_history:${randomUUID()}`,
+          operation: "index_git_history",
           path,
-          { forceReindex, sinceDate, maxCommits },
-          (progress) => {
-            log.debug({ phase: progress.phase, percentage: progress.percentage }, progress.message);
-            if (progressToken !== undefined) {
-              extra.sendNotification({
-                method: "notifications/progress",
-                params: {
-                  progressToken,
-                  progress: progress.percentage,
-                  total: 100,
-                  message: `[${progress.phase}] ${progress.message}`,
-                },
-              });
-            }
-          }
-        );
+          target,
+          run: (updateProgress) =>
+            gitHistoryIndexer.indexHistory(
+              path,
+              { forceReindex, sinceDate, maxCommits },
+              (progress) => {
+                updateProgress(progress);
+                log.debug(
+                  { phase: progress.phase, percentage: progress.percentage },
+                  progress.message
+                );
+                if (progressToken !== undefined) {
+                  void extra
+                    .sendNotification({
+                      method: "notifications/progress",
+                      params: {
+                        progressToken,
+                        progress: progress.percentage,
+                        total: 100,
+                        message: `[${progress.phase}] ${progress.message}`,
+                      },
+                    })
+                    .catch((error: unknown) => {
+                      log.debug({ err: error }, "Progress recipient disconnected");
+                    });
+                }
+              }
+            ),
+        });
+        if (!("state" in terminal)) return terminal;
+        const stats = terminal.result as Awaited<ReturnType<GitHistoryIndexer["indexHistory"]>>;
 
         let statusMessage = `Indexed ${stats.commitsIndexed}/${stats.commitsScanned} commits (${stats.chunksCreated} chunks) in ${(stats.durationMs / 1000).toFixed(1)}s`;
 
@@ -63,6 +85,32 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
           content: [{ type: "text", text: statusMessage }],
           isError: stats.status === "failed",
         };
+      }
+    )
+  );
+
+  server.registerTool(
+    "start_index_git_history",
+    {
+      title: "Start Git History Index Job",
+      description: "Schedule Git-history indexing and return immediately with a durable job record.",
+      inputSchema: schemas.StartIndexGitHistorySchema,
+    },
+    withToolLogging(
+      "start_index_git_history",
+      async ({ path, operationId, sourceRevision, forceReindex, sinceDate, maxCommits }) => {
+        const target = await gitHistoryIndexer.getIndexTarget(path);
+        return startJobResult(
+          await jobManager.submit({
+            operationId,
+            operation: "index_git_history",
+            path,
+            target,
+            sourceRevision,
+            run: (progress) =>
+              gitHistoryIndexer.indexHistory(path, { forceReindex, sinceDate, maxCommits }, progress),
+          })
+        );
       }
     )
   );
@@ -137,20 +185,38 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
       log.info({ tool: "index_new_commits", path }, "Tool called");
       const progressToken = extra._meta?.progressToken;
 
-      const stats = await gitHistoryIndexer.indexNewCommits(path, (progress) => {
-        log.debug({ phase: progress.phase, percentage: progress.percentage }, progress.message);
-        if (progressToken !== undefined) {
-          extra.sendNotification({
-            method: "notifications/progress",
-            params: {
-              progressToken,
-              progress: progress.percentage,
-              total: 100,
-              message: `[${progress.phase}] ${progress.message}`,
-            },
-          });
-        }
+      const target = await gitHistoryIndexer.getIndexTarget(path);
+      const terminal = await runBlockingJob(jobManager, {
+        operationId: `legacy:index_new_commits:${randomUUID()}`,
+        operation: "index_new_commits",
+        path,
+        target,
+        run: (updateProgress) =>
+          gitHistoryIndexer.indexNewCommits(path, (progress) => {
+            updateProgress(progress);
+            log.debug(
+              { phase: progress.phase, percentage: progress.percentage },
+              progress.message
+            );
+            if (progressToken !== undefined) {
+              void extra
+                .sendNotification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: progress.percentage,
+                    total: 100,
+                    message: `[${progress.phase}] ${progress.message}`,
+                  },
+                })
+                .catch((error: unknown) => {
+                  log.debug({ err: error }, "Progress recipient disconnected");
+                });
+            }
+          }),
       });
+      if (!("state" in terminal)) return terminal;
+      const stats = terminal.result as Awaited<ReturnType<GitHistoryIndexer["indexNewCommits"]>>;
 
       let message: string;
       if (stats.newCommits === 0) {
@@ -167,6 +233,31 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
     })
   );
 
+  server.registerTool(
+    "start_index_new_commits",
+    {
+      title: "Start New-Commit Index Job",
+      description: "Schedule incremental Git-history indexing and return immediately with a durable job record.",
+      inputSchema: schemas.StartIndexNewCommitsSchema,
+    },
+    withToolLogging(
+      "start_index_new_commits",
+      async ({ path, operationId, sourceRevision }) => {
+        const target = await gitHistoryIndexer.getIndexTarget(path);
+        return startJobResult(
+          await jobManager.submit({
+            operationId,
+            operation: "index_new_commits",
+            path,
+            target,
+            sourceRevision,
+            run: (progress) => gitHistoryIndexer.indexNewCommits(path, progress),
+          })
+        );
+      }
+    )
+  );
+
   // get_git_index_status
   server.registerTool(
     "get_git_index_status",
@@ -178,8 +269,16 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
     withToolLogging("get_git_index_status", async ({ path }) => {
       log.info({ tool: "get_git_index_status", path }, "Tool called");
       const status = await gitHistoryIndexer.getIndexStatus(path);
+      const target = await gitHistoryIndexer.getIndexTarget(path);
+      const job = await jobManager.getMostRecentForTarget(target);
+      const effectiveStatus =
+        job?.state === "queued" || job?.state === "running"
+          ? "indexing"
+          : job?.state === "failed" || job?.state === "stale"
+            ? job.state
+            : status.status;
 
-      if (status.status === "not_indexed") {
+      if (effectiveStatus === "not_indexed") {
         return {
           content: [
             {
@@ -187,10 +286,15 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
               text: `Git history at "${path}" is not indexed. Use index_git_history to index it first.`,
             },
           ],
+          structuredContent: {
+            ...status,
+            status: effectiveStatus,
+            activeOrRecentJob: job ? publicJob(job) : null,
+          },
         };
       }
 
-      if (status.status === "indexing") {
+      if (effectiveStatus === "indexing") {
         return {
           content: [
             {
@@ -198,21 +302,28 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
               text: `Git history at "${path}" is currently being indexed. ${status.chunksCount || 0} chunks processed so far.`,
             },
           ],
+          structuredContent: {
+            ...status,
+            status: effectiveStatus,
+            activeOrRecentJob: job ? publicJob(job) : null,
+          },
         };
       }
 
       // Format status information
       const statusInfo = {
-        status: status.status,
+        status: effectiveStatus,
         collectionName: status.collectionName,
         commitsIndexed: status.commitsCount,
         chunksCount: status.chunksCount,
         lastCommitHash: status.lastCommitHash,
         lastIndexedAt: status.lastIndexedAt?.toISOString(),
+        activeOrRecentJob: job ? publicJob(job) : null,
       };
 
       return {
         content: [{ type: "text", text: JSON.stringify(statusInfo, null, 2) }],
+        structuredContent: statusInfo,
       };
     })
   );
@@ -228,7 +339,15 @@ export function registerGitHistoryTools(server: McpServer, deps: GitHistoryToolD
     },
     withToolLogging("clear_git_index", async ({ path }) => {
       log.info({ tool: "clear_git_index", path }, "Tool called");
-      await gitHistoryIndexer.clearIndex(path);
+      const target = await gitHistoryIndexer.getIndexTarget(path);
+      const terminal = await runBlockingJob(jobManager, {
+        operationId: `legacy:clear_git_index:${randomUUID()}`,
+        operation: "clear_git_index",
+        path,
+        target,
+        run: () => gitHistoryIndexer.clearIndex(path),
+      });
+      if (!("state" in terminal)) return terminal;
       return {
         content: [{ type: "text", text: `Git history index cleared for "${path}".` }],
       };

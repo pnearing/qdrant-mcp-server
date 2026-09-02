@@ -21,6 +21,7 @@ import type { CodeConfig } from "./code/types.js";
 import { EmbeddingProviderFactory } from "./embeddings/factory.js";
 import { DEFAULT_GIT_CONFIG, GitHistoryIndexer } from "./git/index.js";
 import type { GitConfig } from "./git/types.js";
+import { IndexJobManager } from "./jobs/index-job-manager.js";
 import logger from "./logger.js";
 import { loadPromptsConfig, type PromptsConfig } from "./prompts/index.js";
 import { registerAllPrompts } from "./prompts/register.js";
@@ -209,6 +210,9 @@ const gitConfig: GitConfig = {
 const gitHistoryIndexer = new GitHistoryIndexer(qdrant, embeddings, gitConfig);
 logger.debug({ gitConfig }, "Git history indexer configured");
 
+const indexJobManager = new IndexJobManager();
+await indexJobManager.initialize();
+
 // Load prompts configuration if file exists
 let promptsConfig: PromptsConfig | null = null;
 if (existsSync(PROMPTS_CONFIG_FILE)) {
@@ -238,6 +242,7 @@ function createAndConfigureServer(): McpServer {
       embeddings,
       codeIndexer,
       gitHistoryIndexer,
+      jobManager: indexJobManager,
     });
 
     // Register all resources

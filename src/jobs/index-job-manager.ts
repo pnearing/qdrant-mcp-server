@@ -11,6 +11,8 @@ export const INDEX_JOB_OPERATIONS = [
   "reindex_changes",
   "index_git_history",
   "index_new_commits",
+  "clear_index",
+  "clear_git_index",
 ] as const;
 
 export const INDEX_JOB_STATES = [
@@ -207,10 +209,9 @@ export class IndexJobManager {
 
   async getMostRecentForTarget(target: string): Promise<IndexJobRecord | null> {
     return this.serialized(async () => {
-      const jobs = [...this.jobs.values()]
-        .filter((job) => job.target === target)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      return jobs[0] ? this.clone(jobs[0]) : null;
+      const jobs = [...this.jobs.values()].filter((job) => job.target === target);
+      const mostRecent = jobs.at(-1);
+      return mostRecent ? this.clone(mostRecent) : null;
     });
   }
 
@@ -301,7 +302,7 @@ export class IndexJobManager {
       job.state = state;
       job.completedAt = now;
       job.heartbeatAt = now;
-      job.result = result;
+      job.result = result ?? null;
       job.error = error;
       this.activeJobsByTarget.delete(job.target);
       await this.persist();

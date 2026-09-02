@@ -110,6 +110,24 @@ export const ClearIndexSchema = {
   path: z.string().describe("Path to codebase"),
 };
 
+const StartJobFields = {
+  operationId: z.string().min(1).describe("Opaque client-generated idempotency key"),
+  sourceRevision: z
+    .string()
+    .optional()
+    .describe("Optional source revision or fingerprint supplied by the orchestrator"),
+};
+
+export const StartIndexCodebaseSchema = {
+  ...IndexCodebaseSchema,
+  ...StartJobFields,
+};
+
+export const StartReindexChangesSchema = {
+  ...ReindexChangesSchema,
+  ...StartJobFields,
+};
+
 // Git history indexing schemas
 export const IndexGitHistorySchema = {
   path: z.string().describe("Path to git repository"),
@@ -164,6 +182,20 @@ export const GetGitIndexStatusSchema = {
 
 export const ClearGitIndexSchema = {
   path: z.string().describe("Path to git repository"),
+};
+
+export const StartIndexGitHistorySchema = {
+  ...IndexGitHistorySchema,
+  ...StartJobFields,
+};
+
+export const StartIndexNewCommitsSchema = {
+  ...IndexNewCommitsSchema,
+  ...StartJobFields,
+};
+
+export const GetIndexJobStatusSchema = {
+  jobId: z.string().min(1).describe("Server-generated indexing job identifier"),
 };
 
 // Contextual Search - Combined git + code search
