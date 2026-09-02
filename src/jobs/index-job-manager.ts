@@ -185,7 +185,16 @@ export class IndexJobManager {
       this.jobs.set(job.jobId, job);
       this.jobsByOperationId.set(job.operationId, job.jobId);
       this.activeJobsByTarget.set(job.target, job.jobId);
-      await this.persist();
+      try {
+        await this.persist();
+      } catch (error) {
+        this.jobs.delete(job.jobId);
+        this.jobsByOperationId.delete(job.operationId);
+        if (this.activeJobsByTarget.get(job.target) === job.jobId) {
+          this.activeJobsByTarget.delete(job.target);
+        }
+        throw error;
+      }
       return { accepted: true as const, deduplicated: false, job: this.clone(job) };
     });
 
@@ -262,14 +271,7 @@ export class IndexJobManager {
 
       await this.finish(jobId, "completed", result, null);
     } catch (error) {
-      await this.finish(jobId, "failed", null, this.serializeError(error)).catch(
-        (persistenceError) => {
-          log.fatal(
-            { jobId, err: persistenceError, jobError: error },
-            "Failed to persist terminal index-job failure"
-          );
-        }
-      );
+      await this.finish(jobId, "failed", null, this.serializeError(error));
     } finally {
       if (heartbeat) clearInterval(heartbeat);
     }
@@ -311,7 +313,29 @@ export class IndexJobManager {
       job.result = result ?? null;
       job.error = error;
       this.activeJobsByTarget.delete(job.target);
-      await this.persist();
+      try {
+        await this.persist();
+      } catch (persistenceError) {
+        const details = this.serializeError(persistenceError);
+        job.state = "failed";
+        job.result = null;
+        job.error = {
+          ...details,
+          name: "IndexJobPersistenceError",
+          message: `Failed to persist terminal index-job state: ${details.message}`,
+        };
+        log.fatal(
+          { jobId, intendedState: state, err: persistenceError, jobError: error },
+          "Failed to persist terminal index-job state"
+        );
+
+        await this.persist().catch((retryError) => {
+          log.fatal(
+            { jobId, err: retryError },
+            "Failed to persist index-job failure after terminal persistence error"
+          );
+        });
+      }
       completed = this.clone(job);
     });
 

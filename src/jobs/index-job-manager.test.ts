@@ -248,6 +248,81 @@ describe("IndexJobManager", () => {
     }
   });
 
+  it("rolls back registration when queued-job persistence fails", async () => {
+    const manager = new IndexJobManager(storePath);
+    await manager.initialize();
+    const persist = vi
+      .spyOn(manager as unknown as { persist: () => Promise<void> }, "persist")
+      .mockRejectedValueOnce(Object.assign(new Error("Disk unavailable"), { code: "EIO" }));
+    const run = vi.fn(async () => ({ indexed: true }));
+
+    await expect(
+      manager.submit({
+        operationId: "retryable-registration",
+        operation: "index_codebase",
+        path: "/repo/a",
+        target: "code:a",
+        run,
+      })
+    ).rejects.toMatchObject({ message: "Disk unavailable", code: "EIO" });
+    expect(run).not.toHaveBeenCalled();
+    expect(await manager.getActiveForTarget("code:a")).toBeNull();
+
+    persist.mockRestore();
+    const retry = await manager.submit({
+      operationId: "retryable-registration",
+      operation: "index_codebase",
+      path: "/repo/a",
+      target: "code:a",
+      run,
+    });
+    expect(retry).toMatchObject({ accepted: true, deduplicated: false });
+    await expect(manager.waitForTerminal(retry.job.jobId)).resolves.toMatchObject({
+      state: "completed",
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails and resolves waiters when terminal persistence remains unavailable", async () => {
+    const manager = new IndexJobManager(storePath);
+    await manager.initialize();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const submitted = await manager.submit({
+      operationId: "terminal-persistence",
+      operation: "index_codebase",
+      path: "/repo/a",
+      target: "code:a",
+      run: async () => {
+        await blocked;
+        return { indexed: true };
+      },
+    });
+    await vi.waitFor(async () => {
+      expect(await manager.get(submitted.job.jobId)).toMatchObject({ state: "running" });
+    });
+
+    const persist = vi
+      .spyOn(manager as unknown as { persist: () => Promise<void> }, "persist")
+      .mockRejectedValue(Object.assign(new Error("No space left on device"), { code: "ENOSPC" }));
+    const terminal = manager.waitForTerminal(submitted.job.jobId);
+    release();
+
+    await expect(terminal).resolves.toMatchObject({
+      state: "failed",
+      result: null,
+      error: {
+        name: "IndexJobPersistenceError",
+        code: "ENOSPC",
+        message: expect.stringContaining("No space left on device"),
+      },
+    });
+    expect(await manager.getActiveForTarget("code:a")).toBeNull();
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
   it("marks queued and running records stale after restart", async () => {
     const createdAt = new Date().toISOString();
     await fs.writeFile(
