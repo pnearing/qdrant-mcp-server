@@ -5,6 +5,11 @@
 
 A Model Context Protocol (MCP) server providing semantic search capabilities using Qdrant vector database with multiple embedding providers.
 
+> **Deployment scope for this fork:** This version is supported only as a Docker
+> container using the HTTP MCP transport. `/data` must be mounted read-write from
+> persistent host storage. Direct host execution and stdio transport are not
+> supported deployment modes for this fork.
+
 ## Features
 
 - **Zero Setup**: Works out of the box with Ollama - no API keys required
@@ -20,7 +25,7 @@ A Model Context Protocol (MCP) server providing semantic search capabilities usi
 - **Rate Limiting**: Intelligent throttling with exponential backoff
 - **Full CRUD**: Create, search, and manage collections and documents
 - **Structured Logging**: JSON logging via Pino with configurable log levels
-- **Flexible Deployment**: Run locally (stdio) or as a remote HTTP server
+- **Containerized HTTP Deployment**: Runs as a remote HTTP MCP server with persistent state under `/data`
 - **API Key Authentication**: Connect to secured Qdrant instances (Qdrant Cloud, self-hosted with API keys)
 
 ## Quick Start
@@ -57,7 +62,12 @@ npm run build
 
 ### Configuration
 
-#### Local Setup (stdio transport)
+#### Unsupported: local stdio transport
+
+The upstream project supports direct stdio execution. This fork does not. Use the
+Docker HTTP deployment below with a writable persistent `/data` mount.
+
+<!-- Upstream reference retained for historical context.
 
 ```bash
 claude mcp add --transport stdio qdrant -- node /path/to/qdrant-mcp-server/build/index.js
@@ -87,7 +97,9 @@ Create a collection called "notes" and add a document about machine learning
 
 **Enable example prompts:** Copy `prompts.example.json` to `prompts.json` and restart. Use `/prompt` to list available prompts.
 
-#### Remote Setup (HTTP transport)
+-->
+
+#### Supported Setup (Docker with HTTP transport)
 
 > **⚠️ Security Warning**: When deploying the HTTP transport in production:
 >
