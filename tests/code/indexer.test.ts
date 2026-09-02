@@ -1392,6 +1392,37 @@ function helper(param: string): boolean {
       expect(stats.filesIndexed).toBeGreaterThan(0);
     });
 
+    it("should snapshot files skipped by maxTotalChunks", async () => {
+      const limitedConfig = {
+        ...config,
+        maxTotalChunks: 1,
+      };
+      const limitedIndexer = new CodeIndexer(qdrant as any, embeddings, limitedConfig);
+      const embedBatchSpy = vi.spyOn(embeddings, "embedBatch");
+
+      for (let i = 0; i < 4; i++) {
+        await createTestFile(
+          codebaseDir,
+          `capped${i}.ts`,
+          `export function capped${i}() { console.log('capped ${i}'); return ${i}; }`
+        );
+      }
+
+      const initialStats = await limitedIndexer.indexCodebase(codebaseDir);
+      expect(initialStats.chunksCreated).toBe(1);
+      const embeddingCallsAfterInitialIndex = embedBatchSpy.mock.calls.length;
+
+      const incrementalStats = await limitedIndexer.reindexChanges(codebaseDir);
+
+      expect(incrementalStats).toMatchObject({
+        filesAdded: 0,
+        filesModified: 0,
+        filesDeleted: 0,
+        chunksAdded: 0,
+      });
+      expect(embedBatchSpy).toHaveBeenCalledTimes(embeddingCallsAfterInitialIndex);
+    });
+
     it("should handle maxTotalChunks during chunk iteration", async () => {
       const limitedConfig = {
         ...config,

@@ -173,6 +173,14 @@ export class CodeIndexer {
             continue;
           }
 
+          // Keep intentionally skipped files in the snapshot after the total
+          // chunk budget is exhausted. Otherwise the next incremental run
+          // would misclassify them as newly added and bypass the initial cap.
+          if (this.config.maxTotalChunks && allChunks.length >= this.config.maxTotalChunks) {
+            indexedFileHashes.set(relativePath, this.hashContent(code));
+            continue;
+          }
+
           const language = metadataExtractor.extractLanguage(filePath);
           const chunks = await chunker.chunk(code, filePath, language);
           indexedFileHashes.set(relativePath, this.hashContent(code));
@@ -193,11 +201,6 @@ export class CodeIndexer {
           }
 
           stats.filesIndexed++;
-
-          // Check total chunk limit
-          if (this.config.maxTotalChunks && allChunks.length >= this.config.maxTotalChunks) {
-            break;
-          }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           stats.errors?.push(`Failed to process ${filePath}: ${errorMessage}`);
