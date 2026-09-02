@@ -2,7 +2,14 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultIndexJobStorePath, IndexJobManager } from "./index-job-manager.js";
+import {
+  DEFAULT_INDEX_JOB_MAX_TERMINAL_RECORDS,
+  DEFAULT_INDEX_JOB_TERMINAL_RETENTION_MS,
+  defaultIndexJobStorePath,
+  IndexJobManager,
+  indexJobRetentionOptionsFromEnv,
+  type IndexJobRecord,
+} from "./index-job-manager.js";
 
 describe("IndexJobManager", () => {
   let directory: string;
@@ -18,6 +25,31 @@ describe("IndexJobManager", () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
+  function terminalJob(
+    jobId: string,
+    completedAt: string,
+    state: IndexJobRecord["state"] = "completed"
+  ): IndexJobRecord {
+    return {
+      jobId,
+      operationId: `operation-${jobId}`,
+      operation: "index_codebase",
+      path: `/repo/${jobId}`,
+      target: `code:${jobId}`,
+      state,
+      createdAt: completedAt,
+      heartbeatAt: completedAt,
+      completedAt,
+      progress: null,
+      result: null,
+      error: null,
+    };
+  }
+
+  async function writeJobs(jobs: IndexJobRecord[]): Promise<void> {
+    await fs.writeFile(storePath, JSON.stringify({ version: 1, jobs }, null, 2));
+  }
+
   it("defaults to the persistent MCP state volume and permits an explicit override", () => {
     const original = process.env.INDEX_JOB_STORE_PATH;
     try {
@@ -30,6 +62,148 @@ describe("IndexJobManager", () => {
       if (original === undefined) delete process.env.INDEX_JOB_STORE_PATH;
       else process.env.INDEX_JOB_STORE_PATH = original;
     }
+  });
+
+  it("uses bounded retention defaults and rejects invalid environment configuration", () => {
+    const originalAge = process.env.INDEX_JOB_TERMINAL_RETENTION_MS;
+    const originalMaximum = process.env.INDEX_JOB_MAX_TERMINAL_RECORDS;
+    try {
+      delete process.env.INDEX_JOB_TERMINAL_RETENTION_MS;
+      delete process.env.INDEX_JOB_MAX_TERMINAL_RECORDS;
+      expect(indexJobRetentionOptionsFromEnv()).toEqual({
+        terminalRetentionMs: DEFAULT_INDEX_JOB_TERMINAL_RETENTION_MS,
+        maxTerminalRecords: DEFAULT_INDEX_JOB_MAX_TERMINAL_RECORDS,
+      });
+
+      process.env.INDEX_JOB_TERMINAL_RETENTION_MS = "not-a-number";
+      expect(() => new IndexJobManager(storePath)).toThrow(
+        "INDEX_JOB_TERMINAL_RETENTION_MS must be a positive integer"
+      );
+      process.env.INDEX_JOB_TERMINAL_RETENTION_MS = "1000";
+      process.env.INDEX_JOB_MAX_TERMINAL_RECORDS = "0";
+      expect(() => new IndexJobManager(storePath)).toThrow(
+        "INDEX_JOB_MAX_TERMINAL_RECORDS must be a positive integer"
+      );
+    } finally {
+      if (originalAge === undefined) delete process.env.INDEX_JOB_TERMINAL_RETENTION_MS;
+      else process.env.INDEX_JOB_TERMINAL_RETENTION_MS = originalAge;
+      if (originalMaximum === undefined) delete process.env.INDEX_JOB_MAX_TERMINAL_RECORDS;
+      else process.env.INDEX_JOB_MAX_TERMINAL_RECORDS = originalMaximum;
+    }
+  });
+
+  it("prunes expired terminal jobs and cleans operation-id lookup across restarts", async () => {
+    const now = new Date("2026-09-02T12:00:00.000Z");
+    await writeJobs([
+      terminalJob("expired", "2026-08-01T00:00:00.000Z"),
+      terminalJob("recent", "2026-09-02T11:00:00.000Z", "failed"),
+    ]);
+    const manager = new IndexJobManager(storePath, 5_000, {
+      terminalRetentionMs: 24 * 60 * 60 * 1_000,
+      maxTerminalRecords: 10,
+      now: () => now,
+    });
+    await manager.initialize();
+
+    expect(await manager.get("expired")).toBeNull();
+    expect(await manager.get("recent")).toMatchObject({ state: "failed" });
+    const replacement = await manager.submit({
+      operationId: "operation-expired",
+      operation: "index_codebase",
+      path: "/repo/replacement",
+      target: "code:replacement",
+      run: async () => ({ indexed: true }),
+    });
+    expect(replacement).toMatchObject({ accepted: true, deduplicated: false });
+    await manager.waitForTerminal(replacement.job.jobId);
+
+    const restarted = new IndexJobManager(storePath, 5_000, {
+      terminalRetentionMs: 24 * 60 * 60 * 1_000,
+      maxTerminalRecords: 10,
+      now: () => now,
+    });
+    await restarted.initialize();
+    expect(await restarted.get("expired")).toBeNull();
+    expect(await restarted.get("recent")).not.toBeNull();
+  });
+
+  it("prunes the oldest terminal records first when the maximum is exceeded", async () => {
+    const now = new Date("2026-09-02T12:00:00.000Z");
+    await writeJobs([
+      terminalJob("oldest", "2026-09-02T08:00:00.000Z", "cancelled"),
+      terminalJob("middle", "2026-09-02T09:00:00.000Z", "stale"),
+      terminalJob("newest", "2026-09-02T10:00:00.000Z"),
+    ]);
+    const manager = new IndexJobManager(storePath, 5_000, {
+      terminalRetentionMs: 24 * 60 * 60 * 1_000,
+      maxTerminalRecords: 2,
+      now: () => now,
+    });
+    await manager.initialize();
+
+    expect(await manager.get("oldest")).toBeNull();
+    expect(await manager.get("middle")).not.toBeNull();
+    expect(await manager.get("newest")).not.toBeNull();
+  });
+
+  it("never prunes active jobs or terminal jobs with registered waiters", async () => {
+    const now = new Date("2026-09-02T12:00:00.000Z");
+    await writeJobs([terminalJob("waiting", "2026-08-01T00:00:00.000Z")]);
+    const manager = new IndexJobManager(storePath, 5_000, {
+      terminalRetentionMs: 24 * 60 * 60 * 1_000,
+      maxTerminalRecords: 1,
+      now: () => now,
+    });
+    const waiters = (manager as unknown as {
+      waiters: Map<string, Array<(job: IndexJobRecord) => void>>;
+    }).waiters;
+    waiters.set("waiting", [vi.fn()]);
+    await manager.initialize();
+
+    let release!: () => void;
+    const active = await manager.submit({
+      operationId: "active",
+      operation: "index_codebase",
+      path: "/repo/active",
+      target: "code:active",
+      run: () => new Promise<void>((resolve) => (release = resolve)),
+    });
+    expect(await manager.get("waiting")).not.toBeNull();
+    await vi.waitFor(async () => {
+      expect(await manager.get(active.job.jobId)).toMatchObject({ state: "running" });
+    });
+
+    await manager.submit({
+      operationId: "other",
+      operation: "index_codebase",
+      path: "/repo/other",
+      target: "code:other",
+      run: async () => ({ indexed: true }),
+    });
+    expect(await manager.get(active.job.jobId)).toMatchObject({ state: "running" });
+    expect(await manager.get("waiting")).not.toBeNull();
+    const terminal = manager.waitForTerminal(active.job.jobId);
+    release();
+    await terminal;
+  });
+
+  it("leaves the previous valid store intact when pruning persistence fails", async () => {
+    const originalJobs = [terminalJob("expired", "2026-08-01T00:00:00.000Z")];
+    await writeJobs(originalJobs);
+    const previousStore = await fs.readFile(storePath, "utf-8");
+    const rename = vi
+      .spyOn(fs, "rename")
+      .mockRejectedValueOnce(Object.assign(new Error("Disk failure"), { code: "EIO" }));
+    const manager = new IndexJobManager(storePath, 5_000, {
+      terminalRetentionMs: 24 * 60 * 60 * 1_000,
+      maxTerminalRecords: 10,
+      now: () => new Date("2026-09-02T12:00:00.000Z"),
+    });
+
+    await expect(manager.initialize()).rejects.toMatchObject({ code: "EIO" });
+    expect(await fs.readFile(storePath, "utf-8")).toBe(previousStore);
+    expect(await manager.get("expired")).not.toBeNull();
+    rename.mockRestore();
   });
 
   it("creates the jobs directory before persisting the first job", async () => {

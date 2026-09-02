@@ -85,6 +85,40 @@ interface PersistedJobs {
 }
 
 const TERMINAL_STATES = new Set<IndexJobState>(["completed", "failed", "cancelled", "stale"]);
+export const DEFAULT_INDEX_JOB_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+export const DEFAULT_INDEX_JOB_MAX_TERMINAL_RECORDS = 1_000;
+
+export interface IndexJobRetentionOptions {
+  terminalRetentionMs?: number;
+  maxTerminalRecords?: number;
+  now?: () => Date;
+}
+
+function positiveIntegerSetting(name: string, value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer; received ${JSON.stringify(value)}`);
+  }
+  return parsed;
+}
+
+export function indexJobRetentionOptionsFromEnv(): Required<
+  Omit<IndexJobRetentionOptions, "now">
+> {
+  return {
+    terminalRetentionMs: positiveIntegerSetting(
+      "INDEX_JOB_TERMINAL_RETENTION_MS",
+      process.env.INDEX_JOB_TERMINAL_RETENTION_MS,
+      DEFAULT_INDEX_JOB_TERMINAL_RETENTION_MS
+    ),
+    maxTerminalRecords: positiveIntegerSetting(
+      "INDEX_JOB_MAX_TERMINAL_RECORDS",
+      process.env.INDEX_JOB_MAX_TERMINAL_RECORDS,
+      DEFAULT_INDEX_JOB_MAX_TERMINAL_RECORDS
+    ),
+  };
+}
 
 export function defaultIndexJobStorePath(): string {
   return process.env.INDEX_JOB_STORE_PATH || "/data/jobs/index-jobs.json";
@@ -96,11 +130,32 @@ export class IndexJobManager {
   private readonly activeJobsByTarget = new Map<string, string>();
   private readonly waiters = new Map<string, Array<(job: IndexJobRecord) => void>>();
   private serialization: Promise<void> = Promise.resolve();
+  private readonly terminalRetentionMs: number;
+  private readonly maxTerminalRecords: number;
+  private readonly now: () => Date;
 
   constructor(
     private readonly storePath = defaultIndexJobStorePath(),
-    private readonly heartbeatIntervalMs = 5_000
-  ) {}
+    private readonly heartbeatIntervalMs = 5_000,
+    retentionOptions: IndexJobRetentionOptions = {}
+  ) {
+    const configured = indexJobRetentionOptionsFromEnv();
+    this.terminalRetentionMs =
+      retentionOptions.terminalRetentionMs ?? configured.terminalRetentionMs;
+    this.maxTerminalRecords =
+      retentionOptions.maxTerminalRecords ?? configured.maxTerminalRecords;
+    this.now = retentionOptions.now ?? (() => new Date());
+    positiveIntegerSetting(
+      "terminalRetentionMs",
+      String(this.terminalRetentionMs),
+      DEFAULT_INDEX_JOB_TERMINAL_RETENTION_MS
+    );
+    positiveIntegerSetting(
+      "maxTerminalRecords",
+      String(this.maxTerminalRecords),
+      DEFAULT_INDEX_JOB_MAX_TERMINAL_RECORDS
+    );
+  }
 
   async initialize(): Promise<void> {
     await this.serialized(async () => {
@@ -117,7 +172,7 @@ export class IndexJobManager {
       for (const record of persisted?.jobs ?? []) {
         const job = this.clone(record);
         if (job.state === "queued" || job.state === "running") {
-          const now = new Date().toISOString();
+          const now = this.now().toISOString();
           job.state = "stale";
           job.completedAt = now;
           job.heartbeatAt = now;
@@ -131,12 +186,14 @@ export class IndexJobManager {
         this.jobsByOperationId.set(job.operationId, job.jobId);
       }
 
-      if (changed) await this.persist();
+      const pruned = await this.pruneTerminalJobs();
+      if (changed && pruned === 0) await this.persist();
     });
   }
 
   async submit(request: SubmitIndexJobRequest): Promise<SubmitIndexJobResult> {
     const result = await this.serialized(async () => {
+      await this.pruneTerminalJobs();
       const duplicateId = this.jobsByOperationId.get(request.operationId);
       if (duplicateId) {
         return {
@@ -165,7 +222,7 @@ export class IndexJobManager {
         };
       }
 
-      const createdAt = new Date().toISOString();
+      const createdAt = this.now().toISOString();
       const job: IndexJobRecord = {
         jobId: randomUUID(),
         operationId: request.operationId,
@@ -249,7 +306,7 @@ export class IndexJobManager {
     try {
       await this.serialized(async () => {
         const job = this.jobs.get(jobId)!;
-        const now = new Date().toISOString();
+        const now = this.now().toISOString();
         job.state = "running";
         job.startedAt = now;
         job.heartbeatAt = now;
@@ -281,7 +338,7 @@ export class IndexJobManager {
     await this.serialized(async () => {
       const job = this.jobs.get(jobId);
       if (!job || job.state !== "running") return;
-      job.heartbeatAt = new Date().toISOString();
+      job.heartbeatAt = this.now().toISOString();
       await this.persist();
     });
   }
@@ -291,7 +348,7 @@ export class IndexJobManager {
       const job = this.jobs.get(jobId);
       if (!job || job.state !== "running") return;
       job.progress = { ...progress };
-      job.heartbeatAt = new Date().toISOString();
+      job.heartbeatAt = this.now().toISOString();
       await this.persist();
     });
   }
@@ -306,7 +363,7 @@ export class IndexJobManager {
     await this.serialized(async () => {
       const job = this.jobs.get(jobId);
       if (!job || TERMINAL_STATES.has(job.state)) return;
-      const now = new Date().toISOString();
+      const now = this.now().toISOString();
       job.state = state;
       job.completedAt = now;
       job.heartbeatAt = now;
@@ -342,7 +399,45 @@ export class IndexJobManager {
     if (completed) {
       for (const resolve of this.waiters.get(jobId) ?? []) resolve(completed);
       this.waiters.delete(jobId);
+      await this.serialized(() => this.pruneTerminalJobs()).catch((pruningError) => {
+        log.error({ jobId, err: pruningError }, "Failed to prune terminal index jobs");
+      });
     }
+  }
+
+  private async pruneTerminalJobs(): Promise<number> {
+    const terminalJobs = [...this.jobs.values()].filter((job) => TERMINAL_STATES.has(job.state));
+    const removable = terminalJobs
+      .filter((job) => !this.waiters.has(job.jobId))
+      .sort((left, right) => this.terminalTimestamp(left) - this.terminalTimestamp(right));
+    const cutoff = this.now().getTime() - this.terminalRetentionMs;
+    const jobIdsToPrune = new Set(
+      removable.filter((job) => this.terminalTimestamp(job) < cutoff).map((job) => job.jobId)
+    );
+
+    const retainedTerminalCount = terminalJobs.length - jobIdsToPrune.size;
+    const excess = Math.max(0, retainedTerminalCount - this.maxTerminalRecords);
+    for (const job of removable.filter((job) => !jobIdsToPrune.has(job.jobId)).slice(0, excess)) {
+      jobIdsToPrune.add(job.jobId);
+    }
+    if (jobIdsToPrune.size === 0) return 0;
+
+    const retainedJobs = [...this.jobs.values()].filter((job) => !jobIdsToPrune.has(job.jobId));
+    await this.persist(retainedJobs);
+    for (const jobId of jobIdsToPrune) {
+      const job = this.jobs.get(jobId);
+      if (!job) continue;
+      this.jobs.delete(jobId);
+      if (this.jobsByOperationId.get(job.operationId) === jobId) {
+        this.jobsByOperationId.delete(job.operationId);
+      }
+    }
+    return jobIdsToPrune.size;
+  }
+
+  private terminalTimestamp(job: IndexJobRecord): number {
+    const timestamp = Date.parse(job.completedAt ?? job.heartbeatAt ?? job.createdAt);
+    return Number.isNaN(timestamp) ? 0 : timestamp;
   }
 
   private serializeError(error: unknown): IndexJobError {
@@ -356,8 +451,8 @@ export class IndexJobManager {
     };
   }
 
-  private async persist(): Promise<void> {
-    const payload: PersistedJobs = { version: 1, jobs: [...this.jobs.values()] };
+  private async persist(jobs: IndexJobRecord[] = [...this.jobs.values()]): Promise<void> {
+    const payload: PersistedJobs = { version: 1, jobs };
     const tempPath = `${this.storePath}.tmp.${process.pid}.${randomUUID()}`;
     await fs.mkdir(dirname(this.storePath), { recursive: true });
     try {

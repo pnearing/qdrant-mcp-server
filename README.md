@@ -223,7 +223,16 @@ active indexer.
 
 Job metadata is atomically persisted to `/data/jobs/index-jobs.json`, using the
 existing writable MCP state volume. The `jobs` directory is created automatically.
-`INDEX_JOB_STORE_PATH` remains available as an optional override. On startup,
+`INDEX_JOB_STORE_PATH` remains available as an optional override. Terminal records
+are retained for seven days by default, with at most 1,000 terminal records kept.
+Configure these bounds with `INDEX_JOB_TERMINAL_RETENTION_MS` and
+`INDEX_JOB_MAX_TERMINAL_RECORDS`; both must be positive integers. Queued and running
+jobs, and terminal jobs still being awaited by a blocking caller, are never pruned.
+Because operation-ID records are removed with pruned jobs, idempotency is guaranteed
+only for the configured retention window. Reusing an old `operationId` after its
+terminal record has been pruned can start a new job.
+
+On startup,
 persisted `queued` or `running` jobs
 are changed to `stale`; the server never claims that work survived a process
 restart. Reconcile the source and index status, then submit a new logical attempt
@@ -624,6 +633,8 @@ See [examples/](examples/) directory for detailed guides:
 | `LOG_LEVEL`               | Logging level (fatal/error/warn/info/debug/trace/silent) | info                  |
 | `PROMPTS_CONFIG_FILE`     | Path to prompts configuration JSON                       | prompts.json          |
 | `INDEX_JOB_STORE_PATH`    | Optional durable background-job metadata JSON override    | /data/jobs/index-jobs.json |
+| `INDEX_JOB_TERMINAL_RETENTION_MS` | Maximum terminal-job age in milliseconds | 604800000 (7 days) |
+| `INDEX_JOB_MAX_TERMINAL_RECORDS` | Maximum retained terminal-job records | 1000 |
 
 #### Embedding Configuration
 
